@@ -2,17 +2,19 @@ import { Client } from "pg";
 
 const encoder = new TextEncoder();
 
-
 /*
  * ============================================================
- * PROSHAPE - MERCADO PAGO WEBHOOK
+ * PROSHAPE - MERCADO PAGO + POSTGRESQL
  * ============================================================
  *
+ * PRODUÇÃO:
  * /
- *      PRODUÇÃO
  *
+ * TESTE:
  * /test
- *      TESTE
+ *
+ * HEALTH CHECK:
+ * /db-health
  *
  * ============================================================
  */
@@ -20,27 +22,19 @@ const encoder = new TextEncoder();
 
 /*
  * ============================================================
- * PLANOS PROSHAPE
- * ============================================================
- *
- * IMPORTANTE:
- *
- * Produção = Conta oficial ProShape
- * Teste    = Conta vendedora de teste
- *
+ * PLANOS
  * ============================================================
  */
 
 const PROSHAPE_PLANS = {
-
   production: {
-
     d27387971674447895c70022508e5bb4: {
       key: "mensal",
       name: "ProShape Mensal",
       amount: 29.90,
       frequency: 1,
-      frequencyType: "months"
+      frequencyType: "months",
+      days: 30
     },
 
     "19b9f24a0abf459386c5a706b18d0e9a": {
@@ -48,7 +42,8 @@ const PROSHAPE_PLANS = {
       name: "ProShape Trimestral",
       amount: 84.90,
       frequency: 3,
-      frequencyType: "months"
+      frequencyType: "months",
+      days: 90
     },
 
     "153a4b17b65e445283b94a37fc4a5b0e": {
@@ -56,19 +51,19 @@ const PROSHAPE_PLANS = {
       name: "ProShape Anual",
       amount: 299.90,
       frequency: 12,
-      frequencyType: "months"
+      frequencyType: "months",
+      days: 365
     }
   },
 
-
   test: {
-
     "0b787e8eb57c4fcdb615d2c7fa18a510": {
       key: "mensal",
       name: "ProShape Mensal",
       amount: 29.90,
       frequency: 1,
-      frequencyType: "months"
+      frequencyType: "months",
+      days: 30
     },
 
     "69b9bf7b9b334157bd285392171316ea": {
@@ -76,7 +71,8 @@ const PROSHAPE_PLANS = {
       name: "ProShape Trimestral",
       amount: 84.90,
       frequency: 3,
-      frequencyType: "months"
+      frequencyType: "months",
+      days: 90
     },
 
     "7fd0f1dcfdbb461e96c8f74cb66c81d4": {
@@ -84,70 +80,11 @@ const PROSHAPE_PLANS = {
       name: "ProShape Anual",
       amount: 299.90,
       frequency: 12,
-      frequencyType: "months"
+      frequencyType: "months",
+      days: 365
     }
   }
 };
-
-const PROSHAPE_PLAN_ACCESS_DAYS = {
-  mensal: 30,
-  trimestral: 90,
-  anual: 365
-};
-
-
-/*
- * ============================================================
- * IDENTIFICAR PLANO
- * ============================================================
- */
-
-function identifyProShapePlan(
-  environmentName,
-  planId
-) {
-  if (!planId) {
-    return null;
-  }
-
-  const environmentPlans =
-    PROSHAPE_PLANS[
-      environmentName
-    ];
-
-  if (!environmentPlans) {
-    return null;
-  }
-
-  const plan =
-    environmentPlans[
-      String(planId)
-    ];
-
-  if (!plan) {
-    return null;
-  }
-
-  return {
-    id:
-      String(planId),
-
-    key:
-      plan.key,
-
-    name:
-      plan.name,
-
-    amount:
-      plan.amount,
-
-    frequency:
-      plan.frequency,
-
-    frequencyType:
-      plan.frequencyType
-  };
-}
 
 
 /*
@@ -156,22 +93,14 @@ function identifyProShapePlan(
  * ============================================================
  */
 
-function jsonResponse(
-  data,
-  status = 200
-) {
+function jsonResponse(data, status = 200) {
   return new Response(
-    JSON.stringify(
-      data,
-      null,
-      2
-    ),
+    JSON.stringify(data, null, 2),
     {
       status,
-
       headers: {
-        "content-type":
-          "application/json; charset=UTF-8"
+        "content-type": "application/json; charset=UTF-8",
+        "cache-control": "no-store"
       }
     }
   );
@@ -180,13 +109,73 @@ function jsonResponse(
 
 /*
  * ============================================================
- * PARSE X-SIGNATURE
+ * AMBIENTE
  * ============================================================
  */
 
-function parseSignatureHeader(
-  header
-) {
+function getEnvironment(url, env) {
+  const pathname =
+    url.pathname.replace(/\/+$/, "") || "/";
+
+  if (pathname === "/test") {
+    return {
+      name: "test",
+      accessToken:
+        env.MERCADO_PAGO_TEST_ACCESS_TOKEN,
+      webhookSecret:
+        env.MERCADO_PAGO_TEST_WEBHOOK_SECRET
+    };
+  }
+
+  return {
+    name: "production",
+    accessToken:
+      env.MERCADO_PAGO_ACCESS_TOKEN,
+    webhookSecret:
+      env.MERCADO_PAGO_WEBHOOK_SECRET
+  };
+}
+
+
+/*
+ * ============================================================
+ * IDENTIFICAR PLANO
+ * ============================================================
+ */
+
+function identifyPlan(environmentName, planId) {
+  if (!planId) {
+    return null;
+  }
+
+  const plans =
+    PROSHAPE_PLANS[environmentName];
+
+  if (!plans) {
+    return null;
+  }
+
+  const plan =
+    plans[String(planId)];
+
+  if (!plan) {
+    return null;
+  }
+
+  return {
+    id: String(planId),
+    ...plan
+  };
+}
+
+
+/*
+ * ============================================================
+ * ASSINATURA HMAC
+ * ============================================================
+ */
+
+function parseSignatureHeader(header) {
   const result = {
     ts: "",
     v1: ""
@@ -212,13 +201,11 @@ function parseSignatureHeader(
       valueParts.join("=");
 
     if (key === "ts") {
-      result.ts =
-        value;
+      result.ts = value;
     }
 
     if (key === "v1") {
-      result.v1 =
-        value;
+      result.v1 = value;
     }
   }
 
@@ -226,15 +213,7 @@ function parseSignatureHeader(
 }
 
 
-/*
- * ============================================================
- * HEX -> BYTES
- * ============================================================
- */
-
-function hexToBytes(
-  hex
-) {
+function hexToBytes(hex) {
   if (!hex) {
     return null;
   }
@@ -245,11 +224,9 @@ function hexToBytes(
       .toLowerCase();
 
   if (
-    normalized.length === 0 ||
+    !normalized ||
     normalized.length % 2 !== 0 ||
-    !/^[0-9a-f]+$/.test(
-      normalized
-    )
+    !/^[0-9a-f]+$/.test(normalized)
   ) {
     return null;
   }
@@ -266,10 +243,7 @@ function hexToBytes(
   ) {
     bytes[i / 2] =
       Number.parseInt(
-        normalized.slice(
-          i,
-          i + 2
-        ),
+        normalized.slice(i, i + 2),
         16
       );
   }
@@ -277,12 +251,6 @@ function hexToBytes(
   return bytes;
 }
 
-
-/*
- * ============================================================
- * VALIDAR ASSINATURA MERCADO PAGO
- * ============================================================
- */
 
 async function validateMercadoPagoSignature(
   request,
@@ -296,9 +264,7 @@ async function validateMercadoPagoSignature(
   }
 
   const url =
-    new URL(
-      request.url
-    );
+    new URL(request.url);
 
   const xSignature =
     request.headers.get(
@@ -318,21 +284,13 @@ async function validateMercadoPagoSignature(
       xSignature
     );
 
-  if (
-    !ts ||
-    !v1
-  ) {
+  if (!ts || !v1) {
     console.warn(
-      `Webhook ${environmentName}: x-signature ausente ou incompleto`
+      `Webhook ${environmentName}: assinatura ausente`
     );
 
     return false;
   }
-
-
-  /*
-   * DATA ID
-   */
 
   let dataId =
     url.searchParams.get(
@@ -344,11 +302,6 @@ async function validateMercadoPagoSignature(
       String(dataId)
         .toLowerCase();
   }
-
-
-  /*
-   * MANIFESTO
-   */
 
   let manifest = "";
 
@@ -365,59 +318,32 @@ async function validateMercadoPagoSignature(
   manifest +=
     `ts:${ts};`;
 
-
-  /*
-   * HMAC SHA-256
-   */
-
   const key =
     await crypto.subtle.importKey(
       "raw",
-      encoder.encode(
-        secret
-      ),
+      encoder.encode(secret),
       {
-        name:
-          "HMAC",
-
-        hash:
-          "SHA-256"
+        name: "HMAC",
+        hash: "SHA-256"
       },
       false,
-      [
-        "verify"
-      ]
+      ["verify"]
     );
-
 
   const signatureBytes =
-    hexToBytes(
-      v1
-    );
+    hexToBytes(v1);
 
   if (!signatureBytes) {
-    console.warn(
-      `Webhook ${environmentName}: assinatura inválida`
-    );
-
     return false;
   }
-
 
   const valid =
     await crypto.subtle.verify(
       "HMAC",
       key,
       signatureBytes,
-      encoder.encode(
-        manifest
-      )
+      encoder.encode(manifest)
     );
-
-
-  /*
-   * LOG SEGURO
-   */
 
   console.log(
     "Validação Mercado Pago:",
@@ -436,65 +362,7 @@ async function validateMercadoPagoSignature(
     })
   );
 
-
   return valid;
-}
-
-
-/*
- * ============================================================
- * AMBIENTE
- * ============================================================
- */
-
-function getEnvironment(
-  url,
-  env
-) {
-  const pathname =
-    url.pathname
-      .replace(
-        /\/+$/,
-        ""
-      ) ||
-    "/";
-
-
-  /*
-   * TESTE
-   */
-
-  if (
-    pathname ===
-    "/test"
-  ) {
-    return {
-      name:
-        "test",
-
-      accessToken:
-        env.MERCADO_PAGO_TEST_ACCESS_TOKEN,
-
-      webhookSecret:
-        env.MERCADO_PAGO_TEST_WEBHOOK_SECRET
-    };
-  }
-
-
-  /*
-   * PRODUÇÃO
-   */
-
-  return {
-    name:
-      "production",
-
-    accessToken:
-      env.MERCADO_PAGO_ACCESS_TOKEN,
-
-    webhookSecret:
-      env.MERCADO_PAGO_WEBHOOK_SECRET
-  };
 }
 
 
@@ -518,8 +386,7 @@ async function mercadoPagoGet(
     await fetch(
       `https://api.mercadopago.com${path}`,
       {
-        method:
-          "GET",
+        method: "GET",
 
         headers: {
           Authorization:
@@ -531,50 +398,31 @@ async function mercadoPagoGet(
       }
     );
 
-
   const text =
     await response.text();
 
-
-  let data =
-    null;
+  let data = null;
 
   try {
-
     data =
       text
-        ? JSON.parse(
-            text
-          )
+        ? JSON.parse(text)
         : null;
-
   } catch {
-
     data = {
-      raw:
-        text
+      raw: text
     };
   }
 
-
-  if (
-    !response.ok
-  ) {
+  if (!response.ok) {
     throw new Error(
       `Mercado Pago API ${response.status}: ${text}`
     );
   }
 
-
   return data;
 }
 
-
-/*
- * ============================================================
- * CONSULTAR PAGAMENTO
- * ============================================================
- */
 
 async function getPayment(
   id,
@@ -587,11 +435,16 @@ async function getPayment(
 }
 
 
-/*
- * ============================================================
- * CONSULTAR PAGAMENTO AUTORIZADO DA ASSINATURA
- * ============================================================
- */
+async function getSubscription(
+  id,
+  accessToken
+) {
+  return mercadoPagoGet(
+    `/preapproval/${encodeURIComponent(id)}`,
+    accessToken
+  );
+}
+
 
 async function getAuthorizedPayment(
   id,
@@ -606,99 +459,121 @@ async function getAuthorizedPayment(
 
 /*
  * ============================================================
- * CONSULTAR ASSINATURA
+ * RESUMOS
  * ============================================================
  */
 
-async function getSubscription(
-  id,
-  accessToken
-) {
-  return mercadoPagoGet(
-    `/preapproval/${encodeURIComponent(id)}`,
-    accessToken
-  );
-}
-
-
-/*
- * ============================================================
- * RESUMO PAGAMENTO
- * ============================================================
- */
-
-function paymentSummary(
-  payment
-) {
+function paymentSummary(payment) {
   return {
-
     id:
-      payment?.id ??
-      null,
+      payment?.id ?? null,
 
     status:
-      payment?.status ??
-      null,
+      payment?.status ?? null,
 
     statusDetail:
-      payment?.status_detail ??
-      null,
+      payment?.status_detail ?? null,
 
     amount:
-      payment?.transaction_amount ??
-      null,
+      payment?.transaction_amount ?? null,
 
     currency:
-      payment?.currency_id ??
-      null,
-
-    description:
-      payment?.description ??
-      null,
+      payment?.currency_id ?? null,
 
     externalReference:
-      payment?.external_reference ??
-      null,
+      payment?.external_reference ?? null,
+
+    description:
+      payment?.description ?? null,
 
     payer: {
-
       id:
-        payment?.payer?.id ??
-        null,
+        payment?.payer?.id ?? null,
 
       email:
-        payment?.payer?.email ??
-        null,
+        payment?.payer?.email ?? null,
 
       firstName:
-        payment?.payer?.first_name ??
-        null,
+        payment?.payer?.first_name ?? null,
 
       lastName:
-        payment?.payer?.last_name ??
-        null
+        payment?.payer?.last_name ?? null
     },
 
     dateApproved:
-      payment?.date_approved ??
-      null,
-
-    operationType:
-      payment?.operation_type ??
-      null,
+      payment?.date_approved ?? null,
 
     paymentMethod:
-      payment?.payment_method_id ??
-      null
+      payment?.payment_method_id ?? null
   };
 }
 
 
-/*
- * ============================================================
- * RESUMO PAGAMENTO AUTORIZADO
- * ============================================================
- */
+function subscriptionSummary(
+  subscription
+) {
+  return {
+    id:
+      subscription?.id ?? null,
+
+    status:
+      subscription?.status ?? null,
+
+    reason:
+      subscription?.reason ?? null,
+
+    externalReference:
+      subscription?.external_reference ??
+      null,
+
+    planId:
+      subscription?.preapproval_plan_id ??
+      null,
+
+    payerId:
+      subscription?.payer_id ??
+      null,
+
+    payerEmail:
+      subscription?.payer_email ??
+      null,
+
+    dateCreated:
+      subscription?.date_created ??
+      null,
+
+    nextPaymentDate:
+      subscription?.next_payment_date ??
+      null,
+
+    autoRecurring:
+      subscription?.auto_recurring
+        ? {
+            frequency:
+              subscription
+                .auto_recurring
+                .frequency ?? null,
+
+            frequencyType:
+              subscription
+                .auto_recurring
+                .frequency_type ?? null,
+
+            transactionAmount:
+              subscription
+                .auto_recurring
+                .transaction_amount ??
+              null,
+
+            currencyId:
+              subscription
+                .auto_recurring
+                .currency_id ?? null
+          }
+        : null
+  };
+}
+
 
 function authorizedPaymentSummary(
   authorizedPayment
@@ -712,48 +587,47 @@ function authorizedPaymentSummary(
       authorizedPayment?.status ??
       null,
 
-    summarized:
-      authorizedPayment?.summarized ??
-      null,
-
     preapprovalId:
-      authorizedPayment?.preapproval_id ??
-      null,
-
-    reason:
-      authorizedPayment?.reason ??
+      authorizedPayment
+        ?.preapproval_id ??
       null,
 
     externalReference:
-      authorizedPayment?.external_reference ??
+      authorizedPayment
+        ?.external_reference ??
       null,
 
     currency:
-      authorizedPayment?.currency_id ??
+      authorizedPayment
+        ?.currency_id ??
       null,
 
     amount:
-      authorizedPayment?.transaction_amount ??
+      authorizedPayment
+        ?.transaction_amount ??
       null,
 
     debitDate:
-      authorizedPayment?.debit_date ??
-      null,
-
-    retryAttempt:
-      authorizedPayment?.retry_attempt ??
+      authorizedPayment
+        ?.debit_date ??
       null,
 
     paymentId:
-      authorizedPayment?.payment?.id ??
+      authorizedPayment
+        ?.payment
+        ?.id ??
       null,
 
     paymentStatus:
-      authorizedPayment?.payment?.status ??
+      authorizedPayment
+        ?.payment
+        ?.status ??
       null,
 
     paymentStatusDetail:
-      authorizedPayment?.payment?.status_detail ??
+      authorizedPayment
+        ?.payment
+        ?.status_detail ??
       null
   };
 }
@@ -761,145 +635,40 @@ function authorizedPaymentSummary(
 
 /*
  * ============================================================
- * RESUMO ASSINATURA
+ * VALIDAÇÃO DO PLANO
  * ============================================================
  */
 
-function subscriptionSummary(
+function validatePlan(
+  plan,
   subscription
 ) {
-  return {
-
-    id:
-      subscription?.id ??
-      null,
-
-    status:
-      subscription?.status ??
-      null,
-
-    reason:
-      subscription?.reason ??
-      null,
-
-    externalReference:
-      subscription
-        ?.external_reference ??
-      null,
-
-    planId:
-      subscription
-        ?.preapproval_plan_id ??
-      null,
-
-    payerId:
-      subscription
-        ?.payer_id ??
-      null,
-
-    payerEmail:
-      subscription
-        ?.payer_email ??
-      null,
-
-    dateCreated:
-      subscription
-        ?.date_created ??
-      null,
-
-    lastModified:
-      subscription
-        ?.last_modified ??
-      null,
-
-    nextPaymentDate:
-      subscription
-        ?.next_payment_date ??
-      null,
-
-    autoRecurring:
-      subscription
-        ?.auto_recurring
-        ? {
-
-            frequency:
-              subscription
-                .auto_recurring
-                .frequency ??
-              null,
-
-            frequencyType:
-              subscription
-                .auto_recurring
-                .frequency_type ??
-              null,
-
-            transactionAmount:
-              subscription
-                .auto_recurring
-                .transaction_amount ??
-              null,
-
-            currencyId:
-              subscription
-                .auto_recurring
-                .currency_id ??
-              null
-          }
-        :
-          null
-  };
-}
-
-
-/*
- * ============================================================
- * VALIDAR CONFIGURAÇÃO DO PLANO
- * ============================================================
- */
-
-function validatePlanConfiguration(
-  plan,
-  subscriptionSummaryData
-) {
-  if (
-    !plan ||
-    !subscriptionSummaryData
-  ) {
+  if (!plan || !subscription) {
     return {
-      valid:
-        false,
-
+      valid: false,
       reason:
         "Plano não identificado"
     };
   }
 
-
   const recurring =
-    subscriptionSummaryData
-      .autoRecurring;
-
+    subscription.autoRecurring;
 
   if (!recurring) {
     return {
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "Informações de recorrência ausentes"
+        "Recorrência ausente"
     };
   }
 
-
   const amountMatches =
-    Number(
-      recurring.transactionAmount
-    ) ===
-    Number(
-      plan.amount
-    );
-
+    Math.abs(
+      Number(
+        recurring.transactionAmount
+      ) -
+      Number(plan.amount)
+    ) < 0.01;
 
   const frequencyMatches =
     Number(
@@ -909,61 +678,34 @@ function validatePlanConfiguration(
       plan.frequency
     );
 
-
   const frequencyTypeMatches =
-    recurring.frequencyType ===
-    plan.frequencyType;
-
+    String(
+      recurring.frequencyType
+    ) ===
+    String(
+      plan.frequencyType
+    );
 
   return {
-
     valid:
       amountMatches &&
       frequencyMatches &&
       frequencyTypeMatches,
 
     amountMatches,
-
     frequencyMatches,
-
     frequencyTypeMatches
   };
 }
 
 
-
 /*
  * ============================================================
- * AUTOMAÇÃO DE ACESSO PROSHAPE
- * ============================================================
- *
- * Fonte de verdade para liberar/renovar acesso:
- * subscription_authorized_payment com pagamento aprovado.
- *
- * Produção:
- *   atualiza o aluno.
- *
- * Teste:
- *   DRY-RUN. Não altera acesso de aluno real.
- *
- * Idempotência:
- *   tabela proshape_payment_events evita renovar duas vezes
- *   quando o Mercado Pago reenviar a mesma notificação.
+ * DATA
  * ============================================================
  */
 
-function normalizeEmail(
-  value
-) {
-  return String(
-    value ?? ""
-  )
-    .trim()
-    .toLowerCase();
-}
-
-
-function brazilToday() {
+function todayBrazil() {
   const parts =
     new Intl.DateTimeFormat(
       "en-CA",
@@ -985,7 +727,7 @@ function brazilToday() {
         new Date()
       );
 
-  const values =
+  const map =
     Object.fromEntries(
       parts.map(
         (part) => [
@@ -996,18 +738,18 @@ function brazilToday() {
     );
 
   return (
-    `${values.year}-${values.month}-${values.day}`
+    `${map.year}-${map.month}-${map.day}`
   );
 }
 
 
-function dateOnlyFromIso(
-  value
-) {
+function dateOnly(value) {
+  if (!value) {
+    return null;
+  }
+
   const text =
-    String(
-      value ?? ""
-    );
+    String(value);
 
   const match =
     text.match(
@@ -1021,22 +763,10 @@ function dateOnlyFromIso(
 }
 
 
-function addDaysToDateOnly(
+function addDays(
   dateString,
   days
 ) {
-  const safeDays =
-    Math.max(
-      1,
-      Math.min(
-        3660,
-        Math.floor(
-          Number(days) ||
-          0
-        )
-      )
-    );
-
   const date =
     new Date(
       `${dateString}T12:00:00.000Z`
@@ -1044,50 +774,82 @@ function addDaysToDateOnly(
 
   date.setUTCDate(
     date.getUTCDate() +
-    safeDays
+    Number(days)
   );
 
   return date
     .toISOString()
-    .slice(
-      0,
-      10
-    );
+    .slice(0, 10);
 }
 
 
-function laterDateOnly(
-  a,
-  b
-) {
+function latestDate(a, b) {
   if (!a) {
-    return b ?? null;
+    return b;
   }
 
   if (!b) {
-    return a ?? null;
+    return a;
   }
 
   return (
-    String(a) >=
-    String(b)
-  )
-    ? String(a)
-    : String(b);
-}
-
-
-function planAccessDays(
-  plan
-) {
-  return (
-    PROSHAPE_PLAN_ACCESS_DAYS[
-      plan?.key
-    ] ??
-    0
+    a >= b
+      ? a
+      : b
   );
 }
 
+
+/*
+ * ============================================================
+ * E-MAIL
+ * ============================================================
+ */
+
+function normalizeEmail(value) {
+  return String(
+    value ?? ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+
+/*
+ * ============================================================
+ * EXTERNAL REFERENCE
+ * ============================================================
+ */
+
+function getStudentIdFromExternalReference(
+  value
+) {
+  const reference =
+    String(
+      value ?? ""
+    ).trim();
+
+  if (
+    reference.startsWith(
+      "student:"
+    )
+  ) {
+    return reference
+      .slice(
+        "student:".length
+      )
+      .trim();
+  }
+
+  return "";
+}
+
+
+/*
+ * ============================================================
+ * POSTGRESQL / HYPERDRIVE
+ * ============================================================
+ */
 
 async function createDatabaseClient(
   env
@@ -1114,6 +876,40 @@ async function createDatabaseClient(
 }
 
 
+async function checkDatabase(
+  env
+) {
+  const client =
+    await createDatabaseClient(
+      env
+    );
+
+  try {
+    const result =
+      await client.query(
+        "SELECT 1 AS ok"
+      );
+
+    return (
+      Number(
+        result
+          ?.rows
+          ?.[0]
+          ?.ok
+      ) === 1
+    );
+  } finally {
+    await client.end();
+  }
+}
+
+
+/*
+ * ============================================================
+ * TABELA DE CONTROLE DE PAGAMENTOS
+ * ============================================================
+ */
+
 async function ensurePaymentEventsTable(
   client
 ) {
@@ -1122,79 +918,298 @@ async function ensurePaymentEventsTable(
       environment TEXT NOT NULL,
       event_key TEXT NOT NULL,
       topic TEXT NOT NULL,
+
       authorized_payment_id TEXT,
       payment_id TEXT,
       subscription_id TEXT,
+
+      external_reference TEXT,
       payer_email TEXT,
+
       plan_key TEXT,
       plan_name TEXT,
+
       amount NUMERIC(10, 2),
       currency TEXT,
       payment_status TEXT,
+
       student_id TEXT,
+
       processed BOOLEAN NOT NULL DEFAULT FALSE,
       result TEXT NOT NULL DEFAULT 'received',
+
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (environment, event_key)
+
+      PRIMARY KEY (
+        environment,
+        event_key
+      )
     )
   `);
 
   await client.query(`
     CREATE INDEX IF NOT EXISTS
-      proshape_payment_events_student_idx
-    ON proshape_payment_events (student_id)
+      proshape_payment_events_payment_idx
+    ON
+      proshape_payment_events (
+        payment_id
+      )
   `);
 
   await client.query(`
     CREATE INDEX IF NOT EXISTS
-      proshape_payment_events_payment_idx
-    ON proshape_payment_events (payment_id)
+      proshape_payment_events_student_idx
+    ON
+      proshape_payment_events (
+        student_id
+      )
   `);
 }
 
 
-async function processProShapeSubscriptionPayment({
+/*
+ * ============================================================
+ * LOCALIZAR ALUNO
+ * ============================================================
+ */
+
+async function findStudent(
+  client,
+  externalReference,
+  payerEmail
+) {
+  const externalStudentId =
+    getStudentIdFromExternalReference(
+      externalReference
+    );
+
+  /*
+   * PRIORIDADE 1:
+   * ID exato na external_reference
+   */
+
+  if (externalStudentId) {
+    const result =
+      await client.query(
+        `
+          SELECT
+            id,
+            name,
+            code,
+            email,
+            paid_at,
+            expires_at,
+            blocked
+          FROM students
+          WHERE id = $1
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [
+          externalStudentId
+        ]
+      );
+
+    if (
+      result.rows.length === 1
+    ) {
+      return {
+        status: "found",
+        method:
+          "external_reference",
+        student:
+          result.rows[0]
+      };
+    }
+
+    return {
+      status:
+        "not_found",
+
+      method:
+        "external_reference",
+
+      student:
+        null
+    };
+  }
+
+  /*
+   * PRIORIDADE 2:
+   * E-mail
+   */
+
+  if (!payerEmail) {
+    return {
+      status:
+        "not_found",
+
+      method:
+        "email",
+
+      student:
+        null
+    };
+  }
+
+  const result =
+    await client.query(
+      `
+        SELECT
+          id,
+          name,
+          code,
+          email,
+          paid_at,
+          expires_at,
+          blocked
+        FROM students
+        WHERE
+          LOWER(
+            TRIM(email)
+          ) = $1
+        ORDER BY
+          created_at ASC
+        LIMIT 2
+        FOR UPDATE
+      `,
+      [
+        payerEmail
+      ]
+    );
+
+  if (
+    result.rows.length === 0
+  ) {
+    return {
+      status:
+        "not_found",
+
+      method:
+        "email",
+
+      student:
+        null
+    };
+  }
+
+  /*
+   * Segurança:
+   * dois alunos com o mesmo e-mail.
+   */
+
+  if (
+    result.rows.length > 1
+  ) {
+    return {
+      status:
+        "duplicate_email",
+
+      method:
+        "email",
+
+      student:
+        null
+    };
+  }
+
+  return {
+    status:
+      "found",
+
+    method:
+      "email",
+
+    student:
+      result.rows[0]
+  };
+}
+
+
+/*
+ * ============================================================
+ * REGISTRAR RESULTADO DO EVENTO
+ * ============================================================
+ */
+
+async function updateEventResult(
+  client,
+  environmentName,
+  eventKey,
+  {
+    processed = false,
+    result,
+    studentId = null
+  }
+) {
+  await client.query(
+    `
+      UPDATE
+        proshape_payment_events
+      SET
+        processed = $1,
+        result = $2,
+        student_id = $3,
+        updated_at = NOW()
+      WHERE
+        environment = $4
+        AND event_key = $5
+    `,
+    [
+      processed,
+      result,
+      studentId,
+      environmentName,
+      eventKey
+    ]
+  );
+}
+
+
+/*
+ * ============================================================
+ * PROCESSAR RENOVAÇÃO
+ * ============================================================
+ */
+
+async function processSubscriptionPayment({
   env,
   environmentName,
   topic,
-  authorizedPaymentSummaryData,
-  paymentSummaryData,
-  subscriptionSummaryData,
+  authorizedPayment,
+  payment,
+  subscription,
   plan,
   planValidation
 }) {
-  const authorizedPaymentId =
-    authorizedPaymentSummaryData?.id
-      ? String(
-          authorizedPaymentSummaryData.id
-        )
-      : "";
-
   const paymentId =
-    paymentSummaryData?.id
-      ? String(
-          paymentSummaryData.id
-        )
-      :
-      authorizedPaymentSummaryData
-        ?.paymentId
+    payment?.id
+      ? String(payment.id)
+      : authorizedPayment
+          ?.paymentId
         ? String(
-            authorizedPaymentSummaryData
+            authorizedPayment
               .paymentId
           )
         : "";
 
-  const subscriptionId =
-    subscriptionSummaryData?.id
+  const authorizedPaymentId =
+    authorizedPayment?.id
       ? String(
-          subscriptionSummaryData.id
+          authorizedPayment.id
         )
-      :
-      authorizedPaymentSummaryData
-        ?.preapprovalId
+      : "";
+
+  const subscriptionId =
+    subscription?.id
+      ? String(
+          subscription.id
+        )
+      : authorizedPayment
+          ?.preapprovalId
         ? String(
-            authorizedPaymentSummaryData
+            authorizedPayment
               .preapprovalId
           )
         : "";
@@ -1202,82 +1217,79 @@ async function processProShapeSubscriptionPayment({
   const eventKey =
     paymentId
       ? `payment:${paymentId}`
-      :
-      authorizedPaymentId
+      : authorizedPaymentId
         ? `authorized:${authorizedPaymentId}`
         : "";
 
   if (!eventKey) {
     return {
-      ok:
-        false,
-
-      processed:
-        false,
-
-      reason:
-        "Evento sem identificador idempotente"
+      ok: false,
+      processed: false,
+      result:
+        "missing_event_id"
     };
   }
 
-
   const paymentStatus =
-    paymentSummaryData?.status ??
-    authorizedPaymentSummaryData
+    payment?.status ??
+    authorizedPayment
       ?.paymentStatus ??
     null;
 
+  const externalReference =
+    String(
+      subscription
+        ?.externalReference ??
+      payment
+        ?.externalReference ??
+      authorizedPayment
+        ?.externalReference ??
+      ""
+    ).trim();
+
   const payerEmail =
     normalizeEmail(
-      subscriptionSummaryData
+      subscription
         ?.payerEmail ??
-      paymentSummaryData
-        ?.payer?.email ??
+      payment
+        ?.payer
+        ?.email ??
       ""
     );
 
   const amount =
     Number(
-      paymentSummaryData?.amount ??
-      authorizedPaymentSummaryData
-        ?.amount ??
+      payment?.amount ??
+      authorizedPayment?.amount ??
       0
     );
 
   const currency =
-    paymentSummaryData?.currency ??
-    authorizedPaymentSummaryData
+    payment?.currency ??
+    authorizedPayment
       ?.currency ??
     null;
 
 
   /*
-   * Segurança:
-   * nunca libera acesso sem pagamento aprovado.
+   * PAGAMENTO PRECISA ESTAR APROVADO
    */
 
   if (
-    paymentStatus !==
-    "approved"
+    paymentStatus !== "approved"
   ) {
     return {
-      ok:
-        true,
-
-      processed:
-        false,
-
-      reason:
-        "Pagamento ainda não aprovado",
-
+      ok: true,
+      processed: false,
+      result:
+        "payment_not_approved",
       paymentStatus
     };
   }
 
 
   /*
-   * Segurança:
-   * nunca libera acesso de plano desconhecido/divergente.
+   * PLANO PRECISA SER VÁLIDO
    */
 
   if (
@@ -1285,53 +1297,52 @@ async function processProShapeSubscriptionPayment({
     !planValidation?.valid
   ) {
     return {
-      ok:
-        true,
-
-      processed:
-        false,
-
-      reason:
-        "Plano não identificado ou configuração divergente"
+      ok: true,
+      processed: false,
+      result:
+        "invalid_plan"
     };
   }
 
 
   /*
-   * Segurança:
-   * moeda deve ser BRL para os planos atuais.
+   * VALOR DO PAGAMENTO
+   */
+
+  if (
+    amount &&
+    Math.abs(
+      amount -
+      Number(plan.amount)
+    ) >= 0.01
+  ) {
+    return {
+      ok: true,
+      processed: false,
+      result:
+        "invalid_payment_amount",
+      receivedAmount:
+        amount,
+      expectedAmount:
+        plan.amount
+    };
+  }
+
+
+  /*
+   * MOEDA
    */
 
   if (
     currency &&
     String(currency) !==
-    "BRL"
+      "BRL"
   ) {
     return {
-      ok:
-        true,
-
-      processed:
-        false,
-
-      reason:
-        "Moeda do pagamento inválida",
-
-      currency
-    };
-  }
-
-
-  if (!payerEmail) {
-    return {
-      ok:
-        true,
-
-      processed:
-        false,
-
-      reason:
-        "Pagamento sem e-mail do comprador"
+      ok: true,
+      processed: false,
+      result:
+        "invalid_currency"
     };
   }
 
@@ -1351,8 +1362,9 @@ async function processProShapeSubscriptionPayment({
     );
 
     try {
+
       /*
-       * Registrar ou recuperar evento.
+       * CRIAR / ATUALIZAR EVENTO
        */
 
       await client.query(
@@ -1364,6 +1376,7 @@ async function processProShapeSubscriptionPayment({
             authorized_payment_id,
             payment_id,
             subscription_id,
+            external_reference,
             payer_email,
             plan_key,
             plan_name,
@@ -1375,44 +1388,101 @@ async function processProShapeSubscriptionPayment({
             updated_at
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8, $9, $10, $11, $12,
-            FALSE, 'received', NOW()
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            $8,
+            $9,
+            $10,
+            $11,
+            $12,
+            $13,
+            FALSE,
+            'received',
+            NOW()
           )
-          ON CONFLICT (environment, event_key)
+
+          ON CONFLICT (
+            environment,
+            event_key
+          )
+
           DO UPDATE SET
-            topic = EXCLUDED.topic,
-            authorized_payment_id = EXCLUDED.authorized_payment_id,
-            payment_id = EXCLUDED.payment_id,
-            subscription_id = EXCLUDED.subscription_id,
-            payer_email = EXCLUDED.payer_email,
-            plan_key = EXCLUDED.plan_key,
-            plan_name = EXCLUDED.plan_name,
-            amount = EXCLUDED.amount,
-            currency = EXCLUDED.currency,
-            payment_status = EXCLUDED.payment_status,
-            updated_at = NOW()
+            topic =
+              EXCLUDED.topic,
+
+            authorized_payment_id =
+              EXCLUDED.authorized_payment_id,
+
+            payment_id =
+              EXCLUDED.payment_id,
+
+            subscription_id =
+              EXCLUDED.subscription_id,
+
+            external_reference =
+              EXCLUDED.external_reference,
+
+            payer_email =
+              EXCLUDED.payer_email,
+
+            plan_key =
+              EXCLUDED.plan_key,
+
+            plan_name =
+              EXCLUDED.plan_name,
+
+            amount =
+              EXCLUDED.amount,
+
+            currency =
+              EXCLUDED.currency,
+
+            payment_status =
+              EXCLUDED.payment_status,
+
+            updated_at =
+              NOW()
         `,
         [
           environmentName,
           eventKey,
           topic,
+
           authorizedPaymentId ||
             null,
+
           paymentId ||
             null,
+
           subscriptionId ||
             null,
-          payerEmail,
+
+          externalReference ||
+            null,
+
+          payerEmail ||
+            null,
+
           plan.key,
           plan.name,
+
           amount ||
             null,
+
           currency,
           paymentStatus
         ]
       );
 
+
+      /*
+       * TRAVAR EVENTO
+       */
 
       const eventResult =
         await client.query(
@@ -1421,7 +1491,8 @@ async function processProShapeSubscriptionPayment({
               processed,
               result,
               student_id
-            FROM proshape_payment_events
+            FROM
+              proshape_payment_events
             WHERE
               environment = $1
               AND event_key = $2
@@ -1433,18 +1504,19 @@ async function processProShapeSubscriptionPayment({
           ]
         );
 
-      const existingEvent =
-        eventResult.rows?.[0];
+      const existing =
+        eventResult.rows[0];
 
 
       /*
-       * Idempotência:
-       * já processado = não soma dias novamente.
+       * IDEMPOTÊNCIA
+       *
+       * Se já processamos este paymentId,
+       * não renova novamente.
        */
 
       if (
-        existingEvent
-          ?.processed ===
+        existing?.processed ===
         true
       ) {
         await client.query(
@@ -1452,26 +1524,17 @@ async function processProShapeSubscriptionPayment({
         );
 
         return {
-          ok:
-            true,
-
-          processed:
-            true,
-
-          duplicate:
-            true,
-
+          ok: true,
+          processed: true,
+          duplicate: true,
           result:
-            existingEvent.result,
-
+            existing.result,
           studentId:
-            existingEvent.student_id ??
+            existing.student_id ??
             null,
-
           paymentId:
             paymentId ||
             null,
-
           plan:
             plan.key
         };
@@ -1479,57 +1542,52 @@ async function processProShapeSubscriptionPayment({
 
 
       /*
-       * Ambiente de teste:
-       * valida tudo, mas NÃO altera alunos reais.
+       * TESTE:
+       *
+       * Não altera nenhum aluno real.
        */
 
       if (
-        environmentName !==
-        "production"
+        environmentName ===
+        "test"
       ) {
-        await client.query(
-          `
-            UPDATE proshape_payment_events
-            SET
-              processed = TRUE,
-              result = 'dry_run_test',
-              updated_at = NOW()
-            WHERE
-              environment = $1
-              AND event_key = $2
-          `,
-          [
-            environmentName,
-            eventKey
-          ]
+        await updateEventResult(
+          client,
+          environmentName,
+          eventKey,
+          {
+            processed: true,
+            result:
+              "dry_run_test"
+          }
         );
 
         await client.query(
           "COMMIT"
         );
 
+        console.log(
+          "PAGAMENTO TESTE VALIDADO - DRY RUN:",
+          JSON.stringify({
+            paymentId,
+            subscriptionId,
+            payerEmail,
+            plan:
+              plan.key
+          })
+        );
+
         return {
-          ok:
-            true,
-
-          processed:
-            true,
-
-          duplicate:
-            false,
-
-          dryRun:
-            true,
-
+          ok: true,
+          processed: true,
+          dryRun: true,
+          duplicate: false,
           result:
             "dry_run_test",
-
-          payerEmail,
-
           paymentId:
             paymentId ||
             null,
-
+          payerEmail,
           plan:
             plan.key
         };
@@ -1537,192 +1595,160 @@ async function processProShapeSubscriptionPayment({
 
 
       /*
-       * Localizar aluno por e-mail.
-       *
-       * LIMIT 2:
-       * se houver e-mail duplicado, não atualiza ninguém.
+       * PRODUÇÃO:
+       * localizar aluno.
        */
 
-      const studentsResult =
-        await client.query(
-          `
-            SELECT
-              id,
-              name,
-              code,
-              email,
-              paid_at,
-              expires_at,
-              blocked
-            FROM students
-            WHERE
-              LOWER(TRIM(email)) = $1
-            ORDER BY created_at ASC
-            LIMIT 2
-            FOR UPDATE
-          `,
-          [
-            payerEmail
-          ]
+      const lookup =
+        await findStudent(
+          client,
+          externalReference,
+          payerEmail
         );
 
 
+      /*
+       * NÃO ENCONTROU
+       */
+
       if (
-        studentsResult.rows.length ===
-        0
+        lookup.status ===
+        "not_found"
       ) {
-        await client.query(
-          `
-            UPDATE proshape_payment_events
-            SET
-              processed = FALSE,
-              result = 'student_not_found',
-              updated_at = NOW()
-            WHERE
-              environment = $1
-              AND event_key = $2
-          `,
-          [
-            environmentName,
-            eventKey
-          ]
+        await updateEventResult(
+          client,
+          environmentName,
+          eventKey,
+          {
+            processed: false,
+            result:
+              "student_not_found"
+          }
         );
 
         await client.query(
           "COMMIT"
         );
 
+        console.warn(
+          "ALUNO NÃO ENCONTRADO:",
+          JSON.stringify({
+            paymentId,
+            payerEmail,
+            externalReference,
+            plan:
+              plan.key
+          })
+        );
+
         return {
-          ok:
-            true,
-
-          processed:
-            false,
-
+          ok: true,
+          processed: false,
           result:
             "student_not_found",
-
           payerEmail,
-
           paymentId:
             paymentId ||
-            null,
-
-          plan:
-            plan.key
+            null
         };
       }
 
 
+      /*
+       * E-MAIL DUPLICADO
+       */
+
       if (
-        studentsResult.rows.length >
-        1
+        lookup.status ===
+        "duplicate_email"
       ) {
-        await client.query(
-          `
-            UPDATE proshape_payment_events
-            SET
-              processed = FALSE,
-              result = 'duplicate_student_email',
-              updated_at = NOW()
-            WHERE
-              environment = $1
-              AND event_key = $2
-          `,
-          [
-            environmentName,
-            eventKey
-          ]
+        await updateEventResult(
+          client,
+          environmentName,
+          eventKey,
+          {
+            processed: false,
+            result:
+              "duplicate_student_email"
+          }
         );
 
         await client.query(
           "COMMIT"
         );
 
+        console.warn(
+          "E-MAIL DUPLICADO NO PROSHAPE:",
+          payerEmail
+        );
+
         return {
-          ok:
-            true,
-
-          processed:
-            false,
-
+          ok: true,
+          processed: false,
           result:
             "duplicate_student_email",
-
-          payerEmail,
-
-          paymentId:
-            paymentId ||
-            null,
-
-          plan:
-            plan.key
+          payerEmail
         };
       }
 
 
       const student =
-        studentsResult.rows[0];
+        lookup.student;
 
       const today =
-        brazilToday();
+        todayBrazil();
 
-      const currentExpiry =
-        dateOnlyFromIso(
+      const oldExpiry =
+        dateOnly(
           student.expires_at
-        ) ??
-        (
-          student.expires_at
-            ? String(
-                student.expires_at
-              )
-            : null
         );
 
       const nextPaymentDate =
-        dateOnlyFromIso(
-          subscriptionSummaryData
+        dateOnly(
+          subscription
             ?.nextPaymentDate
         );
 
+
       /*
+       * DEFINIR NOVO VENCIMENTO
+       *
        * Preferência:
-       * usar a próxima cobrança real do Mercado Pago.
+       * próxima cobrança do Mercado Pago.
        *
        * Fallback:
-       * 30/90/365 dias conforme plano.
+       * 30 / 90 / 365 dias.
        */
 
-      let newExpiry =
-        null;
+      let newExpiry;
 
       if (
         nextPaymentDate &&
-        nextPaymentDate >=
-          today
+        nextPaymentDate > today
       ) {
         newExpiry =
-          laterDateOnly(
-            currentExpiry,
+          latestDate(
+            oldExpiry,
             nextPaymentDate
           );
       } else {
-        const baseDate =
-          currentExpiry &&
-          currentExpiry >=
-            today
-            ? currentExpiry
+        const base =
+          oldExpiry &&
+          oldExpiry >= today
+            ? oldExpiry
             : today;
 
         newExpiry =
-          addDaysToDateOnly(
-            baseDate,
-            planAccessDays(
-              plan
-            )
+          addDays(
+            base,
+            plan.days
           );
       }
 
+
+      /*
+       * ATUALIZAR ALUNO
+       */
 
       const updatedResult =
         await client.query(
@@ -1755,30 +1781,31 @@ async function processProShapeSubscriptionPayment({
         updatedResult.rows[0];
 
 
-      await client.query(
-        `
-          UPDATE proshape_payment_events
-          SET
-            student_id = $1,
-            processed = TRUE,
-            result = 'access_renewed',
-            updated_at = NOW()
-          WHERE
-            environment = $2
-            AND event_key = $3
-        `,
-        [
-          student.id,
-          environmentName,
-          eventKey
-        ]
-      );
+      /*
+       * MARCAR EVENTO COMO PROCESSADO
+       */
 
+      await updateEventResult(
+        client,
+        environmentName,
+        eventKey,
+        {
+          processed: true,
+          result:
+            "access_renewed",
+          studentId:
+            student.id
+        }
+      );
 
       await client.query(
         "COMMIT"
       );
 
+
+      /*
+       * LOG
+       */
 
       console.log(
         "ACESSO PROSHAPE RENOVADO:",
@@ -1789,14 +1816,17 @@ async function processProShapeSubscriptionPayment({
           studentName:
             updatedStudent.name,
 
+          lookupMethod:
+            lookup.method,
+
           payerEmail,
+
+          paymentId,
+
+          subscriptionId,
 
           plan:
             plan.key,
-
-          paymentId:
-            paymentId ||
-            null,
 
           paidAt:
             updatedStudent.paid_at,
@@ -1808,17 +1838,28 @@ async function processProShapeSubscriptionPayment({
 
 
       return {
-        ok:
-          true,
+        ok: true,
 
-        processed:
-          true,
+        processed: true,
 
-        duplicate:
-          false,
+        duplicate: false,
 
         result:
           "access_renewed",
+
+        lookupMethod:
+          lookup.method,
+
+        paymentId:
+          paymentId ||
+          null,
+
+        subscriptionId:
+          subscriptionId ||
+          null,
+
+        plan:
+          plan.key,
 
         student: {
           id:
@@ -1841,16 +1882,7 @@ async function processProShapeSubscriptionPayment({
 
           blocked:
             updatedStudent.blocked
-        },
-
-        payerEmail,
-
-        paymentId:
-          paymentId ||
-          null,
-
-        plan:
-          plan.key
+        }
       };
 
     } catch (error) {
@@ -1865,58 +1897,11 @@ async function processProShapeSubscriptionPayment({
     try {
       await client.end();
     } catch {
-      // Nada a fazer.
+      // Sem ação.
     }
   }
 }
 
-
-/*
- * ============================================================
- * BANCO PROSHAPE - HYPERDRIVE
- * ============================================================
- *
- * Binding configurada no Cloudflare:
- * env.PROSHAPE_DB.connectionString
- *
- * Este helper faz apenas SELECT 1.
- * Não lê nem altera dados de alunos.
- * ============================================================
- */
-
-async function checkProShapeDatabase(env) {
-  if (!env.PROSHAPE_DB?.connectionString) {
-    throw new Error(
-      "Binding PROSHAPE_DB não configurada"
-    );
-  }
-
-  const client = new Client({
-    connectionString:
-      env.PROSHAPE_DB.connectionString
-  });
-
-  try {
-    await client.connect();
-
-    const result =
-      await client.query(
-        "SELECT 1 AS ok"
-      );
-
-    return (
-      Number(
-        result?.rows?.[0]?.ok
-      ) === 1
-    );
-  } finally {
-    try {
-      await client.end();
-    } catch {
-      // Nada a fazer.
-    }
-  }
-}
 
 /*
  * ============================================================
@@ -1925,21 +1910,69 @@ async function checkProShapeDatabase(env) {
  */
 
 export default {
-
-  async fetch(
-    request,
-    env
-  ) {
-
+  async fetch(request, env) {
     const url =
-      new URL(
-        request.url
-      );
+      new URL(request.url);
+
+    /*
+     * ========================================================
+     * HEALTH CHECK
+     * ========================================================
+     */
+
+    if (
+      request.method === "GET" &&
+      url.pathname
+        .replace(/\/+$/, "") ===
+        "/db-health"
+    ) {
+      try {
+        const connected =
+          await checkDatabase(env);
+
+        return jsonResponse({
+          ok:
+            connected,
+
+          service:
+            "ProShape Database",
+
+          database:
+            connected
+              ? "connected"
+              : "not-connected",
+
+          hyperdrive:
+            "PROSHAPE_DB"
+        });
+
+      } catch (error) {
+        console.error(
+          "Erro no banco:",
+          error instanceof Error
+            ? error.message
+            : String(error)
+        );
+
+        return jsonResponse(
+          {
+            ok: false,
+            service:
+              "ProShape Database",
+            database:
+              "error",
+            error:
+              "Database connection failed"
+          },
+          500
+        );
+      }
+    }
 
 
     /*
      * ========================================================
-     * DEFINIR AMBIENTE
+     * AMBIENTE
      * ========================================================
      */
 
@@ -1952,83 +1985,15 @@ export default {
 
     /*
      * ========================================================
-     * GET
+     * GET NORMAL
      * ========================================================
      */
 
     if (
-      request.method ===
-      "GET"
+      request.method === "GET"
     ) {
-
-      /*
-       * ======================================================
-       * HEALTH CHECK DO POSTGRES VIA HYPERDRIVE
-       * ======================================================
-       *
-       * URL:
-       * /db-health
-       *
-       * Faz somente SELECT 1.
-       * ======================================================
-       */
-
-      if (
-        url.pathname.replace(/\/+$/, "") ===
-        "/db-health"
-      ) {
-        try {
-          const connected =
-            await checkProShapeDatabase(
-              env
-            );
-
-          return jsonResponse({
-            ok:
-              connected,
-
-            service:
-              "ProShape Database",
-
-            database:
-              connected
-                ? "connected"
-                : "not-connected",
-
-            hyperdrive:
-              "PROSHAPE_DB"
-          });
-        } catch (error) {
-          console.error(
-            "Erro no health check do banco:",
-            error instanceof Error
-              ? error.message
-              : String(error)
-          );
-
-          return jsonResponse(
-            {
-              ok:
-                false,
-
-              service:
-                "ProShape Database",
-
-              database:
-                "error",
-
-              error:
-                "Database connection failed"
-            },
-            500
-          );
-        }
-      }
-
       return jsonResponse({
-
-        ok:
-          true,
+        ok: true,
 
         service:
           "ProShape Mercado Pago Webhook",
@@ -2042,15 +2007,21 @@ export default {
         mercadoPagoApi:
           "enabled",
 
-        planIdentification:
-          "enabled"
+        database:
+          "Hyperdrive",
+
+        automation:
+          environment.name ===
+            "test"
+            ? "dry-run"
+            : "production"
       });
     }
 
 
     /*
      * ========================================================
-     * SOMENTE POST
+     * APENAS POST
      * ========================================================
      */
 
@@ -2058,17 +2029,12 @@ export default {
       request.method !==
       "POST"
     ) {
-
       return jsonResponse(
         {
-
-          ok:
-            false,
-
+          ok: false,
           error:
             "Method Not Allowed"
         },
-
         405
       );
     }
@@ -2078,7 +2044,7 @@ export default {
 
       /*
        * ======================================================
-       * 1. VALIDAR ASSINATURA
+       * VALIDAR ASSINATURA
        * ======================================================
        */
 
@@ -2089,32 +2055,16 @@ export default {
           environment.name
         );
 
-
-      if (
-        !validSignature
-      ) {
-
-        console.warn(
-          `Webhook ${environment.name} rejeitado: assinatura inválida`
-        );
-
-
+      if (!validSignature) {
         return jsonResponse(
           {
-
-            received:
-              false,
-
-            validated:
-              false,
-
+            received: false,
+            validated: false,
             environment:
               environment.name,
-
             error:
               "Invalid signature"
           },
-
           401
         );
       }
@@ -2122,40 +2072,22 @@ export default {
 
       /*
        * ======================================================
-       * 2. LER BODY
+       * BODY
        * ======================================================
        */
 
-      let body =
-        {};
-
+      let body = {};
 
       try {
-
         body =
           await request.json();
-
       } catch {
-
-        console.warn(
-          `Webhook ${environment.name}: corpo JSON vazio ou inválido`
-        );
-
-
         return jsonResponse({
-
-          received:
-            true,
-
-          validated:
-            true,
-
+          received: true,
+          validated: true,
           environment:
             environment.name,
-
-          processed:
-            false,
-
+          processed: false,
           reason:
             "Body JSON inválido ou vazio"
         });
@@ -2164,64 +2096,37 @@ export default {
 
       /*
        * ======================================================
-       * 3. IDENTIFICAR EVENTO
+       * EVENTO
        * ======================================================
        */
 
       const queryType =
         url.searchParams.get(
           "type"
-        ) ||
-        "";
-
+        ) || "";
 
       const bodyType =
-        body?.type ||
-        "";
-
-
-      /*
-       * Query possui prioridade.
-       */
+        body?.type || "";
 
       const topic =
         queryType ||
         bodyType;
 
-
       const entity =
-        body?.entity ||
-        "";
-
+        body?.entity || "";
 
       const action =
-        body?.action ||
-        "";
-
-
-      /*
-       * ID da URL
-       */
+        body?.action || "";
 
       const queryDataId =
         url.searchParams.get(
           "data.id"
         );
 
-
-      /*
-       * ID do body
-       */
-
       const bodyDataId =
-        body?.data?.id ||
-        body?.id ||
+        body?.data?.id ??
+        body?.id ??
         null;
-
-
-      /*
-       * Prioridade URL
-       */
 
       const dataId =
         queryDataId ||
@@ -2229,59 +2134,32 @@ export default {
 
 
       console.log(
-        "Webhook Mercado Pago validado:",
+        "Webhook recebido:",
         JSON.stringify({
-
           environment:
             environment.name,
-
-          queryType,
-
-          bodyType,
-
           topic,
-
+          bodyType,
           entity,
-
           action,
-
-          dataId,
-
-          queryDataId:
-            queryDataId ??
-            null,
-
-          bodyDataId:
-            bodyDataId ??
-            null
+          dataId
         })
       );
 
 
       /*
        * ======================================================
-       * 4. SEM DATA ID
+       * SEM ID
        * ======================================================
        */
 
-      if (
-        !dataId
-      ) {
-
+      if (!dataId) {
         return jsonResponse({
-
-          received:
-            true,
-
-          validated:
-            true,
-
+          received: true,
+          validated: true,
           environment:
             environment.name,
-
-          processed:
-            false,
-
+          processed: false,
           reason:
             "Evento sem data.id"
         });
@@ -2290,51 +2168,35 @@ export default {
 
       /*
        * ======================================================
-       * 5. SIMULADOR
+       * SIMULADOR MERCADO PAGO
+       * ======================================================
+       *
+       * O simulador usa 123456.
+       * Não consulta a API real.
        * ======================================================
        */
 
       if (
-        String(
-          dataId
-        ) ===
+        String(dataId) ===
         "123456"
       ) {
-
         console.log(
-          "Simulação Mercado Pago recebida:",
+          "Simulação Mercado Pago aceita:",
           JSON.stringify({
-
             environment:
               environment.name,
-
             topic,
-
-            bodyType,
-
-            action,
-
             dataId
           })
         );
 
-
         return jsonResponse({
-
-          received:
-            true,
-
-          validated:
-            true,
-
-          simulated:
-            true,
-
+          received: true,
+          validated: true,
+          simulated: true,
           environment:
             environment.name,
-
           topic,
-
           dataId
         });
       }
@@ -2342,18 +2204,7 @@ export default {
 
       /*
        * ======================================================
-       * 6. PAGAMENTO AUTORIZADO DA ASSINATURA
-       * ======================================================
-       *
-       * Este é o evento usado para liberar/renovar o acesso.
-       *
-       * Fluxo:
-       * authorized_payment
-       *      -> payment
-       *      -> preapproval
-       *      -> plano
-       *      -> aluno
-       *      -> renovação idempotente
+       * PAGAMENTO RECORRENTE DA ASSINATURA
        * ======================================================
        */
 
@@ -2361,117 +2212,123 @@ export default {
         topic ===
         "subscription_authorized_payment"
       ) {
-
-        const authorizedPayment =
+        const authorizedPaymentRaw =
           await getAuthorizedPayment(
             dataId,
             environment.accessToken
           );
 
-        const authorizedSummary =
+        const authorizedPayment =
           authorizedPaymentSummary(
-            authorizedPayment
+            authorizedPaymentRaw
           );
 
 
-        let payment =
-          null;
+        /*
+         * PAGAMENTO
+         */
 
-        let paymentDataSummary =
-          null;
-
+        let payment = null;
 
         if (
-          authorizedSummary.paymentId
+          authorizedPayment.paymentId
         ) {
-          payment =
+          const rawPayment =
             await getPayment(
-              authorizedSummary.paymentId,
+              authorizedPayment.paymentId,
               environment.accessToken
             );
 
-          paymentDataSummary =
+          payment =
             paymentSummary(
-              payment
+              rawPayment
             );
         }
 
 
-        let subscription =
-          null;
+        /*
+         * ASSINATURA
+         */
 
-        let subscriptionDataSummary =
-          null;
-
+        let subscription = null;
 
         if (
-          authorizedSummary.preapprovalId
+          authorizedPayment.preapprovalId
         ) {
-          subscription =
+          const rawSubscription =
             await getSubscription(
-              authorizedSummary.preapprovalId,
+              authorizedPayment.preapprovalId,
               environment.accessToken
             );
 
-          subscriptionDataSummary =
+          subscription =
             subscriptionSummary(
-              subscription
+              rawSubscription
             );
         }
 
+
+        /*
+         * PLANO
+         */
 
         const plan =
-          identifyProShapePlan(
+          identifyPlan(
             environment.name,
-            subscriptionDataSummary
-              ?.planId
+            subscription?.planId
           );
-
 
         const planValidation =
-          validatePlanConfiguration(
+          validatePlan(
             plan,
-            subscriptionDataSummary
+            subscription
           );
 
 
+        /*
+         * AUTOMAÇÃO
+         */
+
         const automation =
-          await processProShapeSubscriptionPayment({
+          await processSubscriptionPayment({
             env,
+
             environmentName:
               environment.name,
+
             topic,
-            authorizedPaymentSummaryData:
-              authorizedSummary,
-            paymentSummaryData:
-              paymentDataSummary,
-            subscriptionSummaryData:
-              subscriptionDataSummary,
+
+            authorizedPayment,
+
+            payment,
+
+            subscription,
+
             plan,
+
             planValidation
           });
 
 
         console.log(
-          "Pagamento recorrente de assinatura processado:",
+          "Resultado automação:",
           JSON.stringify({
             environment:
               environment.name,
 
-            authorizedPayment:
-              authorizedSummary,
+            paymentId:
+              payment?.id ??
+              authorizedPayment
+                .paymentId ??
+              null,
 
-            payment:
-              paymentDataSummary,
-
-            subscription:
-              subscriptionDataSummary,
+            subscriptionId:
+              subscription?.id ??
+              null,
 
             plan:
               plan?.key ??
               null,
-
-            planValidation,
 
             automation
           })
@@ -2479,30 +2336,23 @@ export default {
 
 
         return jsonResponse({
+          received: true,
 
-          received:
-            true,
-
-          validated:
-            true,
+          validated: true,
 
           environment:
             environment.name,
 
-          processed:
-            true,
+          processed: true,
 
           resource:
             "subscription_authorized_payment",
 
-          authorizedPayment:
-            authorizedSummary,
+          authorizedPayment,
 
-          payment:
-            paymentDataSummary,
+          payment,
 
-          subscription:
-            subscriptionDataSummary,
+          subscription,
 
           plan,
 
@@ -2515,95 +2365,63 @@ export default {
 
       /*
        * ======================================================
-       * 7. PAGAMENTO
+       * PAYMENT
+       * ======================================================
+       *
+       * Consultamos e registramos.
+       *
+       * Não renovamos por esta notificação para evitar
+       * duplicidade com subscription_authorized_payment.
        * ======================================================
        */
 
       if (
-        topic ===
-          "payment" ||
-
-        bodyType ===
-          "payment" ||
-
+        topic === "payment" ||
+        bodyType === "payment" ||
         action.startsWith(
           "payment."
         )
       ) {
-
-        const payment =
+        const rawPayment =
           await getPayment(
             dataId,
             environment.accessToken
           );
 
-
-        const summary =
+        const payment =
           paymentSummary(
-            payment
+            rawPayment
           );
-
 
         console.log(
           "Pagamento consultado:",
           JSON.stringify({
-
             environment:
               environment.name,
-
-            ...summary
+            ...payment
           })
         );
 
-
-        /*
-         * PAGAMENTO APROVADO
-         */
-
-        if (
-          summary.status ===
-          "approved"
-        ) {
-
-          console.log(
-            "PAGAMENTO APROVADO:",
-            JSON.stringify({
-
-              environment:
-                environment.name,
-
-              ...summary
-            })
-          );
-        }
-
-
         return jsonResponse({
+          received: true,
 
-          received:
-            true,
-
-          validated:
-            true,
+          validated: true,
 
           environment:
             environment.name,
 
-          processed:
-            true,
+          processed: true,
 
           resource:
             "payment",
 
-          payment:
-            summary,
+          payment,
 
           automation: {
-            processed:
-              false,
+            processed: false,
 
             reason:
-              "A liberação automática usa subscription_authorized_payment para evitar duplicidade ou pagamento não relacionado."
+              "Renovação executada somente por subscription_authorized_payment para evitar duplicidade."
           }
         });
       }
@@ -2611,7 +2429,7 @@ export default {
 
       /*
        * ======================================================
-       * 8. ASSINATURA / PREAPPROVAL
+       * PREAPPROVAL / ASSINATURA
        * ======================================================
        */
 
@@ -2625,280 +2443,85 @@ export default {
         entity ===
           "preapproval"
       ) {
-
-        /*
-         * Consultar assinatura real.
-         */
-
-        const subscription =
+        const rawSubscription =
           await getSubscription(
             dataId,
             environment.accessToken
           );
 
-
-        const summary =
+        const subscription =
           subscriptionSummary(
-            subscription
+            rawSubscription
           );
-
-
-        /*
-         * IDENTIFICAR PLANO
-         */
 
         const plan =
-          identifyProShapePlan(
+          identifyPlan(
             environment.name,
-            summary.planId
+            subscription.planId
           );
-
-
-        /*
-         * VALIDAR VALOR + FREQUÊNCIA
-         */
 
         const planValidation =
-          validatePlanConfiguration(
+          validatePlan(
             plan,
-            summary
+            subscription
           );
-
-
-        /*
-         * LOG DA ASSINATURA
-         */
 
         console.log(
           "Assinatura consultada:",
           JSON.stringify({
-
             environment:
               environment.name,
 
-            ...summary
+            subscriptionId:
+              subscription.id,
+
+            status:
+              subscription.status,
+
+            payerEmail:
+              subscription.payerEmail,
+
+            plan:
+              plan?.key ??
+              null,
+
+            planValid:
+              planValidation.valid
           })
         );
-
-
-        /*
-         * ====================================================
-         * IDENTIFICAÇÃO PROSHAPE
-         * ====================================================
-         */
-
-        const proShapeData = {
-
-          cliente:
-            summary.payerEmail,
-
-          assinaturaId:
-            summary.id,
-
-          status:
-            summary.status,
-
-          planoId:
-            summary.planId,
-
-          plano:
-            plan?.key ??
-            "desconhecido",
-
-          planoNome:
-            plan?.name ??
-            "Plano não identificado",
-
-          valor:
-            summary
-              .autoRecurring
-              ?.transactionAmount ??
-            null,
-
-          moeda:
-            summary
-              .autoRecurring
-              ?.currencyId ??
-            null,
-
-          frequencia:
-            summary
-              .autoRecurring
-              ?.frequency ??
-            null,
-
-          tipoFrequencia:
-            summary
-              .autoRecurring
-              ?.frequencyType ??
-            null,
-
-          proximaCobranca:
-            summary.nextPaymentDate,
-
-          planoValidado:
-            planValidation.valid
-        };
-
-
-        console.log(
-          "Assinatura ProShape identificada:",
-          JSON.stringify({
-            environment:
-              environment.name,
-
-            ...proShapeData
-          })
-        );
-
-
-        /*
-         * ====================================================
-         * PLANO NÃO RECONHECIDO
-         * ====================================================
-         */
-
-        if (!plan) {
-
-          console.warn(
-            "PLANO PROSHAPE NÃO IDENTIFICADO:",
-            JSON.stringify({
-
-              environment:
-                environment.name,
-
-              planId:
-                summary.planId,
-
-              subscriptionId:
-                summary.id,
-
-              payerEmail:
-                summary.payerEmail
-            })
-          );
-        }
-
-
-        /*
-         * ====================================================
-         * PLANO COM CONFIGURAÇÃO DIVERGENTE
-         * ====================================================
-         */
-
-        if (
-          plan &&
-          !planValidation.valid
-        ) {
-
-          console.warn(
-            "CONFIGURAÇÃO DO PLANO DIVERGENTE:",
-            JSON.stringify({
-
-              environment:
-                environment.name,
-
-              plan,
-
-              received:
-                summary.autoRecurring,
-
-              validation:
-                planValidation
-            })
-          );
-        }
-
-
-        /*
-         * ====================================================
-         * ASSINATURA ATIVA E PLANO VÁLIDO
-         * ====================================================
-         */
-
-        if (
-          plan &&
-          planValidation.valid &&
-          summary.status ===
-            "authorized"
-        ) {
-
-          console.log(
-            "ASSINATURA PROSHAPE ATIVA:",
-            JSON.stringify({
-
-              environment:
-                environment.name,
-
-              cliente:
-                summary.payerEmail,
-
-              plano:
-                plan.key,
-
-              planoNome:
-                plan.name,
-
-              assinaturaId:
-                summary.id,
-
-              proximaCobranca:
-                summary.nextPaymentDate
-            })
-          );
-
-
-          /*
-           * ================================================
-           * IMPORTANTE
-           * ================================================
-           *
-           * A assinatura autorizada, sozinha, NÃO libera
-           * acesso. A liberação ocorre somente quando chega
-           * subscription_authorized_payment com pagamento
-           * realmente aprovado.
-           *
-           * Isso evita liberar acesso sem cobrança aprovada.
-           * ================================================
-           */
-        }
-
 
         return jsonResponse({
+          received: true,
 
-          received:
-            true,
-
-          validated:
-            true,
+          validated: true,
 
           environment:
             environment.name,
 
-          processed:
-            true,
+          processed: true,
 
           resource:
             "subscription",
 
-          subscription:
-            summary,
+          subscription,
 
-          proShape:
-            proShapeData,
+          plan,
 
-          plan:
-            plan,
+          planValidation,
 
-          planValidation:
-            planValidation
+          automation: {
+            processed: false,
+
+            reason:
+              "Autorização da assinatura não libera acesso. A renovação ocorre quando a cobrança recorrente estiver aprovada."
+          }
         });
       }
 
 
       /*
        * ======================================================
-       * 9. OUTROS EVENTOS SUBSCRIPTION_*
+       * OUTROS EVENTOS DE ASSINATURA
        * ======================================================
        */
 
@@ -2907,44 +2530,25 @@ export default {
           "subscription_"
         )
       ) {
-
         console.log(
           "Evento de assinatura recebido:",
           JSON.stringify({
-
             environment:
               environment.name,
-
             topic,
-
-            bodyType,
-
-            action,
-
             dataId
           })
         );
 
-
         return jsonResponse({
-
-          received:
-            true,
-
-          validated:
-            true,
-
+          received: true,
+          validated: true,
           environment:
             environment.name,
-
-          processed:
-            true,
-
+          processed: true,
           resource:
             "subscription_event",
-
           topic,
-
           dataId
         });
       }
@@ -2952,53 +2556,33 @@ export default {
 
       /*
        * ======================================================
-       * 10. EVENTOS NÃO UTILIZADOS
+       * EVENTO NÃO UTILIZADO
        * ======================================================
        */
 
       console.log(
         "Evento válido não utilizado:",
         JSON.stringify({
-
           environment:
             environment.name,
-
           topic,
-
-          bodyType,
-
           entity,
-
           action,
-
           dataId
         })
       );
 
-
       return jsonResponse({
-
-        received:
-          true,
-
-        validated:
-          true,
-
+        received: true,
+        validated: true,
         environment:
           environment.name,
-
-        processed:
-          false,
-
+        processed: false,
         reason:
           "Evento não utilizado pela ProShape"
       });
 
-
-    } catch (
-      error
-    ) {
-
+    } catch (error) {
       console.error(
         "Erro no webhook ProShape:",
         error instanceof Error
@@ -3006,12 +2590,9 @@ export default {
           : String(error)
       );
 
-
       return jsonResponse(
         {
-
-          received:
-            false,
+          received: false,
 
           environment:
             environment.name,
@@ -3024,7 +2605,6 @@ export default {
               ? error.message
               : String(error)
         },
-
         500
       );
     }
