@@ -7,22 +7,15 @@ const encoder = new TextEncoder();
  * PROSHAPE - MERCADO PAGO + POSTGRESQL
  * ============================================================
  *
- * PRODUÇÃO:
- * /
+ * PRODUÇÃO: /
+ * TESTE:    /test
+ * BANCO:    /db-health
  *
- * TESTE:
- * /test
- *
- * HEALTH CHECK:
- * /db-health
- *
- * ============================================================
- */
-
-
-/*
- * ============================================================
- * PLANOS
+ * Regra principal:
+ * - primeiro pagamento aprovado: cria o aluno automaticamente;
+ * - pagamentos seguintes: renovam o aluno já existente;
+ * - o mesmo paymentId nunca adiciona acesso duas vezes;
+ * - ambiente /test nunca altera alunos reais.
  * ============================================================
  */
 
@@ -31,59 +24,65 @@ const PROSHAPE_PLANS = {
     d27387971674447895c70022508e5bb4: {
       key: "mensal",
       name: "ProShape Mensal",
-      amount: 29.90,
+      amount: 29.9,
       frequency: 1,
       frequencyType: "months",
-      days: 30
+      days: 30,
+      monthlyValue: 29.9,
     },
 
     "19b9f24a0abf459386c5a706b18d0e9a": {
       key: "trimestral",
       name: "ProShape Trimestral",
-      amount: 84.90,
+      amount: 84.9,
       frequency: 3,
       frequencyType: "months",
-      days: 90
+      days: 90,
+      monthlyValue: 28.3,
     },
 
     "153a4b17b65e445283b94a37fc4a5b0e": {
       key: "anual",
       name: "ProShape Anual",
-      amount: 299.90,
+      amount: 299.9,
       frequency: 12,
       frequencyType: "months",
-      days: 365
-    }
+      days: 365,
+      monthlyValue: 24.99,
+    },
   },
 
   test: {
     "0b787e8eb57c4fcdb615d2c7fa18a510": {
       key: "mensal",
       name: "ProShape Mensal",
-      amount: 29.90,
+      amount: 29.9,
       frequency: 1,
       frequencyType: "months",
-      days: 30
+      days: 30,
+      monthlyValue: 29.9,
     },
 
     "69b9bf7b9b334157bd285392171316ea": {
       key: "trimestral",
       name: "ProShape Trimestral",
-      amount: 84.90,
+      amount: 84.9,
       frequency: 3,
       frequencyType: "months",
-      days: 90
+      days: 90,
+      monthlyValue: 28.3,
     },
 
     "7fd0f1dcfdbb461e96c8f74cb66c81d4": {
       key: "anual",
       name: "ProShape Anual",
-      amount: 299.90,
+      amount: 299.9,
       frequency: 12,
       frequencyType: "months",
-      days: 365
-    }
-  }
+      days: 365,
+      monthlyValue: 24.99,
+    },
+  },
 };
 
 
@@ -93,15 +92,26 @@ const PROSHAPE_PLANS = {
  * ============================================================
  */
 
-function jsonResponse(data, status = 200) {
+function jsonResponse(
+  data,
+  status = 200
+) {
   return new Response(
-    JSON.stringify(data, null, 2),
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
     {
       status,
+
       headers: {
-        "content-type": "application/json; charset=UTF-8",
-        "cache-control": "no-store"
-      }
+        "content-type":
+          "application/json; charset=UTF-8",
+
+        "cache-control":
+          "no-store",
+      },
     }
   );
 }
@@ -113,72 +123,90 @@ function jsonResponse(data, status = 200) {
  * ============================================================
  */
 
-function getEnvironment(url, env) {
+function getEnvironment(
+  url,
+  env
+) {
   const pathname =
-    url.pathname.replace(/\/+$/, "") || "/";
+    url.pathname
+      .replace(
+        /\/+$/,
+        ""
+      ) || "/";
 
-  if (pathname === "/test") {
+  if (
+    pathname ===
+    "/test"
+  ) {
     return {
-      name: "test",
+      name:
+        "test",
+
       accessToken:
         env.MERCADO_PAGO_TEST_ACCESS_TOKEN,
+
       webhookSecret:
-        env.MERCADO_PAGO_TEST_WEBHOOK_SECRET
+        env.MERCADO_PAGO_TEST_WEBHOOK_SECRET,
     };
   }
 
   return {
-    name: "production",
+    name:
+      "production",
+
     accessToken:
       env.MERCADO_PAGO_ACCESS_TOKEN,
+
     webhookSecret:
-      env.MERCADO_PAGO_WEBHOOK_SECRET
+      env.MERCADO_PAGO_WEBHOOK_SECRET,
   };
 }
 
 
 /*
  * ============================================================
- * IDENTIFICAR PLANO
+ * PLANO
  * ============================================================
  */
 
-function identifyPlan(environmentName, planId) {
+function identifyPlan(
+  environmentName,
+  planId
+) {
   if (!planId) {
     return null;
   }
 
-  const plans =
-    PROSHAPE_PLANS[environmentName];
-
-  if (!plans) {
-    return null;
-  }
-
   const plan =
-    plans[String(planId)];
+    PROSHAPE_PLANS[
+      environmentName
+    ]?.[
+      String(planId)
+    ];
 
-  if (!plan) {
-    return null;
-  }
+  return plan
+    ? {
+        id:
+          String(planId),
 
-  return {
-    id: String(planId),
-    ...plan
-  };
+        ...plan,
+      }
+    : null;
 }
 
 
 /*
  * ============================================================
- * ASSINATURA HMAC
+ * ASSINATURA WEBHOOK
  * ============================================================
  */
 
-function parseSignatureHeader(header) {
+function parseSignatureHeader(
+  header
+) {
   const result = {
     ts: "",
-    v1: ""
+    v1: "",
   };
 
   if (!header) {
@@ -187,7 +215,8 @@ function parseSignatureHeader(header) {
 
   for (
     const part of
-    String(header).split(",")
+    String(header)
+      .split(",")
   ) {
     const [
       key,
@@ -198,14 +227,23 @@ function parseSignatureHeader(header) {
         .split("=");
 
     const value =
-      valueParts.join("=");
+      valueParts
+        .join("=");
 
-    if (key === "ts") {
-      result.ts = value;
+    if (
+      key ===
+      "ts"
+    ) {
+      result.ts =
+        value;
     }
 
-    if (key === "v1") {
-      result.v1 = value;
+    if (
+      key ===
+      "v1"
+    ) {
+      result.v1 =
+        value;
     }
   }
 
@@ -213,37 +251,48 @@ function parseSignatureHeader(header) {
 }
 
 
-function hexToBytes(hex) {
-  if (!hex) {
-    return null;
-  }
-
+function hexToBytes(
+  hex
+) {
   const normalized =
-    String(hex)
+    String(
+      hex || ""
+    )
       .trim()
       .toLowerCase();
 
   if (
     !normalized ||
-    normalized.length % 2 !== 0 ||
-    !/^[0-9a-f]+$/.test(normalized)
+    normalized.length %
+      2 !==
+      0 ||
+    !/^[0-9a-f]+$/.test(
+      normalized
+    )
   ) {
     return null;
   }
 
   const bytes =
     new Uint8Array(
-      normalized.length / 2
+      normalized.length /
+        2
     );
 
   for (
     let i = 0;
-    i < normalized.length;
+    i <
+    normalized.length;
     i += 2
   ) {
-    bytes[i / 2] =
+    bytes[
+      i / 2
+    ] =
       Number.parseInt(
-        normalized.slice(i, i + 2),
+        normalized.slice(
+          i,
+          i + 2
+        ),
         16
       );
   }
@@ -264,7 +313,9 @@ async function validateMercadoPagoSignature(
   }
 
   const url =
-    new URL(request.url);
+    new URL(
+      request.url
+    );
 
   const xSignature =
     request.headers.get(
@@ -278,17 +329,16 @@ async function validateMercadoPagoSignature(
 
   const {
     ts,
-    v1
+    v1,
   } =
     parseSignatureHeader(
       xSignature
     );
 
-  if (!ts || !v1) {
-    console.warn(
-      `Webhook ${environmentName}: assinatura ausente`
-    );
-
+  if (
+    !ts ||
+    !v1
+  ) {
     return false;
   }
 
@@ -303,7 +353,8 @@ async function validateMercadoPagoSignature(
         .toLowerCase();
   }
 
-  let manifest = "";
+  let manifest =
+    "";
 
   if (dataId) {
     manifest +=
@@ -321,54 +372,54 @@ async function validateMercadoPagoSignature(
   const key =
     await crypto.subtle.importKey(
       "raw",
-      encoder.encode(secret),
+
+      encoder.encode(
+        secret
+      ),
+
       {
-        name: "HMAC",
-        hash: "SHA-256"
+        name:
+          "HMAC",
+
+        hash:
+          "SHA-256",
       },
+
       false,
-      ["verify"]
+
+      [
+        "verify",
+      ]
     );
 
   const signatureBytes =
-    hexToBytes(v1);
+    hexToBytes(
+      v1
+    );
 
-  if (!signatureBytes) {
+  if (
+    !signatureBytes
+  ) {
     return false;
   }
 
-  const valid =
-    await crypto.subtle.verify(
-      "HMAC",
-      key,
-      signatureBytes,
-      encoder.encode(manifest)
-    );
+  return crypto.subtle.verify(
+    "HMAC",
 
-  console.log(
-    "Validação Mercado Pago:",
-    JSON.stringify({
-      environment:
-        environmentName,
+    key,
 
-      dataId:
-        dataId ?? null,
+    signatureBytes,
 
-      requestId:
-        xRequestId ?? null,
-
-      signatureValid:
-        valid
-    })
+    encoder.encode(
+      manifest
+    )
   );
-
-  return valid;
 }
 
 
 /*
  * ============================================================
- * API MERCADO PAGO
+ * MERCADO PAGO API
  * ============================================================
  */
 
@@ -376,7 +427,9 @@ async function mercadoPagoGet(
   path,
   accessToken
 ) {
-  if (!accessToken) {
+  if (
+    !accessToken
+  ) {
     throw new Error(
       "Access Token Mercado Pago não configurado"
     );
@@ -386,35 +439,42 @@ async function mercadoPagoGet(
     await fetch(
       `https://api.mercadopago.com${path}`,
       {
-        method: "GET",
+        method:
+          "GET",
 
         headers: {
           Authorization:
             `Bearer ${accessToken}`,
 
           Accept:
-            "application/json"
-        }
+            "application/json",
+        },
       }
     );
 
   const text =
     await response.text();
 
-  let data = null;
+  let data =
+    null;
 
   try {
     data =
       text
-        ? JSON.parse(text)
+        ? JSON.parse(
+            text
+          )
         : null;
   } catch {
     data = {
-      raw: text
+      raw:
+        text,
     };
   }
 
-  if (!response.ok) {
+  if (
+    !response.ok
+  ) {
     throw new Error(
       `Mercado Pago API ${response.status}: ${text}`
     );
@@ -424,34 +484,57 @@ async function mercadoPagoGet(
 }
 
 
-async function getPayment(
+function getPayment(
   id,
   accessToken
 ) {
   return mercadoPagoGet(
-    `/v1/payments/${encodeURIComponent(id)}`,
+    `/v1/payments/${encodeURIComponent(
+      id
+    )}`,
+
     accessToken
   );
 }
 
 
-async function getSubscription(
+function getSubscription(
   id,
   accessToken
 ) {
   return mercadoPagoGet(
-    `/preapproval/${encodeURIComponent(id)}`,
+    `/preapproval/${encodeURIComponent(
+      id
+    )}`,
+
     accessToken
   );
 }
 
 
-async function getAuthorizedPayment(
+function getAuthorizedPayment(
   id,
   accessToken
 ) {
   return mercadoPagoGet(
-    `/authorized_payments/${encodeURIComponent(id)}`,
+    `/authorized_payments/${encodeURIComponent(
+      id
+    )}`,
+
+    accessToken
+  );
+}
+
+
+function searchAuthorizedPaymentByPaymentId(
+  paymentId,
+  accessToken
+) {
+  return mercadoPagoGet(
+    `/authorized_payments/search?payment_id=${encodeURIComponent(
+      paymentId
+    )}`,
+
     accessToken
   );
 }
@@ -459,68 +542,92 @@ async function getAuthorizedPayment(
 
 /*
  * ============================================================
- * RESUMOS
+ * RESUMO PAGAMENTO
  * ============================================================
  */
 
-function paymentSummary(payment) {
+function paymentSummary(
+  payment
+) {
   return {
     id:
-      payment?.id ?? null,
+      payment?.id ??
+      null,
 
     status:
-      payment?.status ?? null,
+      payment?.status ??
+      null,
 
     statusDetail:
-      payment?.status_detail ?? null,
+      payment?.status_detail ??
+      null,
 
     amount:
-      payment?.transaction_amount ?? null,
+      payment?.transaction_amount ??
+      null,
 
     currency:
-      payment?.currency_id ?? null,
-
-    externalReference:
-      payment?.external_reference ?? null,
+      payment?.currency_id ??
+      null,
 
     description:
-      payment?.description ?? null,
+      payment?.description ??
+      null,
+
+    externalReference:
+      payment?.external_reference ??
+      null,
 
     payer: {
       id:
-        payment?.payer?.id ?? null,
+        payment?.payer?.id ??
+        null,
 
       email:
-        payment?.payer?.email ?? null,
+        payment?.payer?.email ??
+        null,
 
       firstName:
-        payment?.payer?.first_name ?? null,
+        payment?.payer?.first_name ??
+        null,
 
       lastName:
-        payment?.payer?.last_name ?? null
+        payment?.payer?.last_name ??
+        null,
     },
 
     dateApproved:
-      payment?.date_approved ?? null,
+      payment?.date_approved ??
+      null,
 
     paymentMethod:
-      payment?.payment_method_id ?? null
+      payment?.payment_method_id ??
+      null,
   };
 }
 
+
+/*
+ * ============================================================
+ * RESUMO ASSINATURA
+ * ============================================================
+ */
 
 function subscriptionSummary(
   subscription
 ) {
   return {
     id:
-      subscription?.id ?? null,
+      subscription?.id ??
+      null,
 
     status:
-      subscription?.status ?? null,
+      subscription?.status ??
+      null,
 
     reason:
-      subscription?.reason ?? null,
+      subscription?.reason ??
+      null,
 
     externalReference:
       subscription?.external_reference ??
@@ -552,12 +659,14 @@ function subscriptionSummary(
             frequency:
               subscription
                 .auto_recurring
-                .frequency ?? null,
+                .frequency ??
+              null,
 
             frequencyType:
               subscription
                 .auto_recurring
-                .frequency_type ?? null,
+                .frequency_type ??
+              null,
 
             transactionAmount:
               subscription
@@ -568,12 +677,19 @@ function subscriptionSummary(
             currencyId:
               subscription
                 .auto_recurring
-                .currency_id ?? null
+                .currency_id ??
+              null,
           }
-        : null
+        : null,
   };
 }
 
+
+/*
+ * ============================================================
+ * RESUMO PAGAMENTO AUTORIZADO
+ * ============================================================
+ */
 
 function authorizedPaymentSummary(
   authorizedPayment
@@ -588,28 +704,23 @@ function authorizedPaymentSummary(
       null,
 
     preapprovalId:
-      authorizedPayment
-        ?.preapproval_id ??
+      authorizedPayment?.preapproval_id ??
       null,
 
     externalReference:
-      authorizedPayment
-        ?.external_reference ??
+      authorizedPayment?.external_reference ??
       null,
 
     currency:
-      authorizedPayment
-        ?.currency_id ??
+      authorizedPayment?.currency_id ??
       null,
 
     amount:
-      authorizedPayment
-        ?.transaction_amount ??
+      authorizedPayment?.transaction_amount ??
       null,
 
     debitDate:
-      authorizedPayment
-        ?.debit_date ??
+      authorizedPayment?.debit_date ??
       null,
 
     paymentId:
@@ -628,14 +739,14 @@ function authorizedPaymentSummary(
       authorizedPayment
         ?.payment
         ?.status_detail ??
-      null
+      null,
   };
 }
 
 
 /*
  * ============================================================
- * VALIDAÇÃO DO PLANO
+ * VALIDAR PLANO
  * ============================================================
  */
 
@@ -643,36 +754,51 @@ function validatePlan(
   plan,
   subscription
 ) {
-  if (!plan || !subscription) {
+  if (
+    !plan ||
+    !subscription
+  ) {
     return {
-      valid: false,
+      valid:
+        false,
+
       reason:
-        "Plano não identificado"
+        "Plano não identificado",
     };
   }
 
   const recurring =
-    subscription.autoRecurring;
+    subscription
+      .autoRecurring;
 
-  if (!recurring) {
+  if (
+    !recurring
+  ) {
     return {
-      valid: false,
+      valid:
+        false,
+
       reason:
-        "Recorrência ausente"
+        "Informações de recorrência ausentes",
     };
   }
 
   const amountMatches =
     Math.abs(
       Number(
-        recurring.transactionAmount
+        recurring
+          .transactionAmount
       ) -
-      Number(plan.amount)
-    ) < 0.01;
+        Number(
+          plan.amount
+        )
+    ) <
+    0.01;
 
   const frequencyMatches =
     Number(
-      recurring.frequency
+      recurring
+        .frequency
     ) ===
     Number(
       plan.frequency
@@ -680,10 +806,12 @@ function validatePlan(
 
   const frequencyTypeMatches =
     String(
-      recurring.frequencyType
+      recurring
+        .frequencyType
     ) ===
     String(
-      plan.frequencyType
+      plan
+        .frequencyType
     );
 
   return {
@@ -693,15 +821,17 @@ function validatePlan(
       frequencyTypeMatches,
 
     amountMatches,
+
     frequencyMatches,
-    frequencyTypeMatches
+
+    frequencyTypeMatches,
   };
 }
 
 
 /*
  * ============================================================
- * DATA
+ * DATAS / TEXTO
  * ============================================================
  */
 
@@ -709,6 +839,7 @@ function todayBrazil() {
   const parts =
     new Intl.DateTimeFormat(
       "en-CA",
+
       {
         timeZone:
           "America/Sao_Paulo",
@@ -720,7 +851,7 @@ function todayBrazil() {
           "2-digit",
 
         day:
-          "2-digit"
+          "2-digit",
       }
     )
       .formatToParts(
@@ -730,31 +861,31 @@ function todayBrazil() {
   const map =
     Object.fromEntries(
       parts.map(
-        (part) => [
+        (
+          part
+        ) => [
           part.type,
-          part.value
+          part.value,
         ]
       )
     );
 
-  return (
-    `${map.year}-${map.month}-${map.day}`
-  );
+  return `${map.year}-${map.month}-${map.day}`;
 }
 
 
-function dateOnly(value) {
+function dateOnly(
+  value
+) {
   if (!value) {
     return null;
   }
 
-  const text =
-    String(value);
-
   const match =
-    text.match(
-      /^(\d{4}-\d{2}-\d{2})/
-    );
+    String(value)
+      .match(
+        /^(\d{4}-\d{2}-\d{2})/
+      );
 
   return (
     match?.[1] ??
@@ -774,16 +905,24 @@ function addDays(
 
   date.setUTCDate(
     date.getUTCDate() +
-    Number(days)
+      Number(
+        days
+      )
   );
 
   return date
     .toISOString()
-    .slice(0, 10);
+    .slice(
+      0,
+      10
+    );
 }
 
 
-function latestDate(a, b) {
+function latestDate(
+  a,
+  b
+) {
   if (!a) {
     return b;
   }
@@ -792,21 +931,15 @@ function latestDate(a, b) {
     return a;
   }
 
-  return (
-    a >= b
-      ? a
-      : b
-  );
+  return a >= b
+    ? a
+    : b;
 }
 
 
-/*
- * ============================================================
- * E-MAIL
- * ============================================================
- */
-
-function normalizeEmail(value) {
+function normalizeEmail(
+  value
+) {
   return String(
     value ?? ""
   )
@@ -815,11 +948,23 @@ function normalizeEmail(value) {
 }
 
 
-/*
- * ============================================================
- * EXTERNAL REFERENCE
- * ============================================================
- */
+function cleanName(
+  value
+) {
+  return String(
+    value ?? ""
+  )
+    .replace(
+      /\s+/g,
+      " "
+    )
+    .trim()
+    .slice(
+      0,
+      120
+    );
+}
+
 
 function getStudentIdFromExternalReference(
   value
@@ -827,21 +972,80 @@ function getStudentIdFromExternalReference(
   const reference =
     String(
       value ?? ""
-    ).trim();
+    )
+      .trim();
 
   if (
-    reference.startsWith(
+    !reference.startsWith(
       "student:"
     )
   ) {
-    return reference
-      .slice(
-        "student:".length
-      )
-      .trim();
+    return "";
   }
 
-  return "";
+  return reference
+    .slice(
+      "student:".length
+    )
+    .trim();
+}
+
+
+function payerDisplayName(
+  payment,
+  payerEmail
+) {
+  const first =
+    cleanName(
+      payment
+        ?.payer
+        ?.firstName
+    );
+
+  const last =
+    cleanName(
+      payment
+        ?.payer
+        ?.lastName
+    );
+
+  const full =
+    cleanName(
+      `${first} ${last}`
+    );
+
+  if (full) {
+    return full;
+  }
+
+  const local =
+    String(
+      payerEmail ||
+        ""
+    )
+      .split("@")[0] ||
+    "Aluno ProShape";
+
+  const fromEmail =
+    cleanName(
+      local
+        .replace(
+          /[._+-]+/g,
+          " "
+        )
+        .replace(
+          /\b\w/g,
+          (
+            char
+          ) =>
+            char.toUpperCase()
+        )
+    );
+
+  return (
+    fromEmail ||
+    "Aluno ProShape"
+  );
 }
 
 
@@ -867,7 +1071,7 @@ async function createDatabaseClient(
     new Client({
       connectionString:
         env.PROSHAPE_DB
-          .connectionString
+          .connectionString,
     });
 
   await client.connect();
@@ -896,7 +1100,8 @@ async function checkDatabase(
           ?.rows
           ?.[0]
           ?.ok
-      ) === 1
+      ) ===
+      1
     );
   } finally {
     await client.end();
@@ -906,7 +1111,7 @@ async function checkDatabase(
 
 /*
  * ============================================================
- * TABELA DE CONTROLE DE PAGAMENTOS
+ * TABELA DE EVENTOS
  * ============================================================
  */
 
@@ -918,53 +1123,67 @@ async function ensurePaymentEventsTable(
       environment TEXT NOT NULL,
       event_key TEXT NOT NULL,
       topic TEXT NOT NULL,
-
       authorized_payment_id TEXT,
       payment_id TEXT,
       subscription_id TEXT,
-
       external_reference TEXT,
       payer_email TEXT,
-
       plan_key TEXT,
       plan_name TEXT,
-
       amount NUMERIC(10, 2),
       currency TEXT,
       payment_status TEXT,
-
       student_id TEXT,
-
       processed BOOLEAN NOT NULL DEFAULT FALSE,
       result TEXT NOT NULL DEFAULT 'received',
-
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-      PRIMARY KEY (
-        environment,
-        event_key
-      )
+      PRIMARY KEY (environment, event_key)
     )
   `);
 
   await client.query(`
-    CREATE INDEX IF NOT EXISTS
-      proshape_payment_events_payment_idx
-    ON
-      proshape_payment_events (
-        payment_id
-      )
+    CREATE INDEX IF NOT EXISTS proshape_payment_events_payment_idx
+    ON proshape_payment_events (payment_id)
   `);
 
   await client.query(`
-    CREATE INDEX IF NOT EXISTS
-      proshape_payment_events_student_idx
-    ON
-      proshape_payment_events (
-        student_id
-      )
+    CREATE INDEX IF NOT EXISTS proshape_payment_events_student_idx
+    ON proshape_payment_events (student_id)
   `);
+}
+
+
+async function updateEventResult(
+  client,
+  environmentName,
+  eventKey,
+  {
+    processed = false,
+    result,
+    studentId = null,
+  }
+) {
+  await client.query(
+    `
+      UPDATE proshape_payment_events
+      SET
+        processed = $1,
+        result = $2,
+        student_id = $3,
+        updated_at = NOW()
+      WHERE
+        environment = $4
+        AND event_key = $5
+    `,
+    [
+      processed,
+      result,
+      studentId,
+      environmentName,
+      eventKey,
+    ]
+  );
 }
 
 
@@ -984,13 +1203,10 @@ async function findStudent(
       externalReference
     );
 
-  /*
-   * PRIORIDADE 1:
-   * ID exato na external_reference
-   */
-
-  if (externalStudentId) {
-    const result =
+  if (
+    externalStudentId
+  ) {
+    const byId =
       await client.query(
         `
           SELECT
@@ -1007,40 +1223,30 @@ async function findStudent(
           FOR UPDATE
         `,
         [
-          externalStudentId
+          externalStudentId,
         ]
       );
 
     if (
-      result.rows.length === 1
+      byId.rows.length ===
+      1
     ) {
       return {
-        status: "found",
+        status:
+          "found",
+
         method:
           "external_reference",
+
         student:
-          result.rows[0]
+          byId.rows[0],
       };
     }
-
-    return {
-      status:
-        "not_found",
-
-      method:
-        "external_reference",
-
-      student:
-        null
-    };
   }
 
-  /*
-   * PRIORIDADE 2:
-   * E-mail
-   */
-
-  if (!payerEmail) {
+  if (
+    !payerEmail
+  ) {
     return {
       status:
         "not_found",
@@ -1049,11 +1255,11 @@ async function findStudent(
         "email",
 
       student:
-        null
+        null,
     };
   }
 
-  const result =
+  const byEmail =
     await client.query(
       `
         SELECT
@@ -1065,22 +1271,19 @@ async function findStudent(
           expires_at,
           blocked
         FROM students
-        WHERE
-          LOWER(
-            TRIM(email)
-          ) = $1
-        ORDER BY
-          created_at ASC
+        WHERE LOWER(TRIM(email)) = $1
+        ORDER BY created_at ASC
         LIMIT 2
         FOR UPDATE
       `,
       [
-        payerEmail
+        payerEmail,
       ]
     );
 
   if (
-    result.rows.length === 0
+    byEmail.rows.length ===
+    0
   ) {
     return {
       status:
@@ -1090,17 +1293,13 @@ async function findStudent(
         "email",
 
       student:
-        null
+        null,
     };
   }
 
-  /*
-   * Segurança:
-   * dois alunos com o mesmo e-mail.
-   */
-
   if (
-    result.rows.length > 1
+    byEmail.rows.length >
+    1
   ) {
     return {
       status:
@@ -1110,7 +1309,7 @@ async function findStudent(
         "email",
 
       student:
-        null
+        null,
     };
   }
 
@@ -1122,54 +1321,212 @@ async function findStudent(
       "email",
 
     student:
-      result.rows[0]
+      byEmail.rows[0],
   };
 }
 
 
 /*
  * ============================================================
- * REGISTRAR RESULTADO DO EVENTO
+ * GERAR CÓDIGO ÚNICO DO ALUNO
  * ============================================================
  */
 
-async function updateEventResult(
-  client,
-  environmentName,
-  eventKey,
-  {
-    processed = false,
-    result,
-    studentId = null
-  }
+async function generateUniqueStudentCode(
+  client
 ) {
-  await client.query(
-    `
-      UPDATE
-        proshape_payment_events
-      SET
-        processed = $1,
-        result = $2,
-        student_id = $3,
-        updated_at = NOW()
-      WHERE
-        environment = $4
-        AND event_key = $5
-    `,
-    [
-      processed,
-      result,
-      studentId,
-      environmentName,
-      eventKey
-    ]
+  for (
+    let attempt = 0;
+    attempt < 20;
+    attempt += 1
+  ) {
+    const random =
+      crypto
+        .randomUUID()
+        .replace(
+          /-/g,
+          ""
+        )
+        .slice(
+          0,
+          8
+        )
+        .toUpperCase();
+
+    const code =
+      `PRO${random}`;
+
+    const existing =
+      await client.query(
+        `
+          SELECT id
+          FROM students
+          WHERE code = $1
+          LIMIT 1
+        `,
+        [
+          code,
+        ]
+      );
+
+    if (
+      existing.rows.length ===
+      0
+    ) {
+      return code;
+    }
+  }
+
+  throw new Error(
+    "Não foi possível gerar um código de acesso único"
   );
 }
 
 
 /*
  * ============================================================
- * PROCESSAR RENOVAÇÃO
+ * CRIAR NOVO ALUNO
+ * ============================================================
+ */
+
+async function createStudentFromPayment(
+  client,
+  {
+    payment,
+    payerEmail,
+    plan,
+    paidAt,
+    expiresAt,
+  }
+) {
+  if (
+    !payerEmail
+  ) {
+    throw new Error(
+      "Pagamento sem e-mail do pagador; aluno não pode ser criado com segurança"
+    );
+  }
+
+  const studentId =
+    crypto.randomUUID();
+
+  const code =
+    await generateUniqueStudentCode(
+      client
+    );
+
+  const name =
+    payerDisplayName(
+      payment,
+      payerEmail
+    );
+
+  const result =
+    await client.query(
+      `
+        INSERT INTO students (
+          id,
+          name,
+          code,
+          goal,
+          note,
+          monthly_value,
+          paid_at,
+          expires_at,
+          blocked,
+          email,
+          updated_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          '',
+          '',
+          $4,
+          $5,
+          $6,
+          FALSE,
+          $7,
+          NOW()
+        )
+        RETURNING
+          id,
+          name,
+          code,
+          email,
+          paid_at,
+          expires_at,
+          blocked
+      `,
+      [
+        studentId,
+        name,
+        code,
+        String(
+          plan.monthlyValue
+        ),
+        paidAt,
+        expiresAt,
+        payerEmail,
+      ]
+    );
+
+  return result
+    .rows[0];
+}
+
+
+/*
+ * ============================================================
+ * CALCULAR VENCIMENTO
+ * ============================================================
+ */
+
+function calculateNewExpiry(
+  existingExpiry,
+  nextPaymentDate,
+  planDays
+) {
+  const today =
+    todayBrazil();
+
+  const oldExpiry =
+    dateOnly(
+      existingExpiry
+    );
+
+  const nextDate =
+    dateOnly(
+      nextPaymentDate
+    );
+
+  if (
+    nextDate &&
+    nextDate > today
+  ) {
+    return latestDate(
+      oldExpiry,
+      nextDate
+    );
+  }
+
+  const base =
+    oldExpiry &&
+    oldExpiry >= today
+      ? oldExpiry
+      : today;
+
+  return addDays(
+    base,
+    planDays
+  );
+}
+
+
+/*
+ * ============================================================
+ * PROCESSAMENTO DO PAGAMENTO
  * ============================================================
  */
 
@@ -1181,11 +1538,13 @@ async function processSubscriptionPayment({
   payment,
   subscription,
   plan,
-  planValidation
+  planValidation,
 }) {
   const paymentId =
     payment?.id
-      ? String(payment.id)
+      ? String(
+          payment.id
+        )
       : authorizedPayment
           ?.paymentId
         ? String(
@@ -1221,12 +1580,18 @@ async function processSubscriptionPayment({
         ? `authorized:${authorizedPaymentId}`
         : "";
 
-  if (!eventKey) {
+  if (
+    !eventKey
+  ) {
     return {
-      ok: false,
-      processed: false,
+      ok:
+        false,
+
+      processed:
+        false,
+
       result:
-        "missing_event_id"
+        "missing_event_id",
     };
   }
 
@@ -1245,7 +1610,8 @@ async function processSubscriptionPayment({
       authorizedPayment
         ?.externalReference ??
       ""
-    ).trim();
+    )
+      .trim();
 
   const payerEmail =
     normalizeEmail(
@@ -1260,7 +1626,8 @@ async function processSubscriptionPayment({
   const amount =
     Number(
       payment?.amount ??
-      authorizedPayment?.amount ??
+      authorizedPayment
+        ?.amount ??
       0
     );
 
@@ -1272,59 +1639,79 @@ async function processSubscriptionPayment({
 
 
   /*
-   * PAGAMENTO PRECISA ESTAR APROVADO
+   * PAGAMENTO APROVADO
    */
 
   if (
-    paymentStatus !== "approved"
+    paymentStatus !==
+    "approved"
   ) {
     return {
-      ok: true,
-      processed: false,
+      ok:
+        true,
+
+      processed:
+        false,
+
       result:
         "payment_not_approved",
-      paymentStatus
+
+      paymentStatus,
     };
   }
 
 
   /*
-   * PLANO PRECISA SER VÁLIDO
+   * PLANO VÁLIDO
    */
 
   if (
     !plan ||
-    !planValidation?.valid
+    !planValidation
+      ?.valid
   ) {
     return {
-      ok: true,
-      processed: false,
+      ok:
+        true,
+
+      processed:
+        false,
+
       result:
-        "invalid_plan"
+        "invalid_plan",
     };
   }
 
 
   /*
-   * VALOR DO PAGAMENTO
+   * VALOR
    */
 
   if (
     amount &&
     Math.abs(
       amount -
-      Number(plan.amount)
-    ) >= 0.01
+        Number(
+          plan.amount
+        )
+    ) >=
+      0.01
   ) {
     return {
-      ok: true,
-      processed: false,
+      ok:
+        true,
+
+      processed:
+        false,
+
       result:
         "invalid_payment_amount",
+
       receivedAmount:
         amount,
+
       expectedAmount:
-        plan.amount
+        plan.amount,
     };
   }
 
@@ -1335,14 +1722,43 @@ async function processSubscriptionPayment({
 
   if (
     currency &&
-    String(currency) !==
+    String(
+      currency
+    ) !==
       "BRL"
   ) {
     return {
-      ok: true,
-      processed: false,
+      ok:
+        true,
+
+      processed:
+        false,
+
       result:
-        "invalid_currency"
+        "invalid_currency",
+    };
+  }
+
+
+  /*
+   * PRECISA TER IDENTIDADE
+   */
+
+  if (
+    !payerEmail &&
+    !getStudentIdFromExternalReference(
+      externalReference
+    )
+  ) {
+    return {
+      ok:
+        true,
+
+      processed:
+        false,
+
+      result:
+        "missing_customer_identity",
     };
   }
 
@@ -1364,7 +1780,7 @@ async function processSubscriptionPayment({
     try {
 
       /*
-       * CRIAR / ATUALIZAR EVENTO
+       * REGISTRAR EVENTO
        */
 
       await client.query(
@@ -1475,7 +1891,8 @@ async function processSubscriptionPayment({
             null,
 
           currency,
-          paymentStatus
+
+          paymentStatus,
         ]
       );
 
@@ -1500,23 +1917,22 @@ async function processSubscriptionPayment({
           `,
           [
             environmentName,
-            eventKey
+            eventKey,
           ]
         );
 
-      const existing =
-        eventResult.rows[0];
+      const existingEvent =
+        eventResult
+          .rows[0];
 
 
       /*
-       * IDEMPOTÊNCIA
-       *
-       * Se já processamos este paymentId,
-       * não renova novamente.
+       * PAGAMENTO DUPLICADO
        */
 
       if (
-        existing?.processed ===
+        existingEvent
+          ?.processed ===
         true
       ) {
         await client.query(
@@ -1524,27 +1940,36 @@ async function processSubscriptionPayment({
         );
 
         return {
-          ok: true,
-          processed: true,
-          duplicate: true,
+          ok:
+            true,
+
+          processed:
+            true,
+
+          duplicate:
+            true,
+
           result:
-            existing.result,
+            existingEvent
+              .result,
+
           studentId:
-            existing.student_id ??
+            existingEvent
+              .student_id ??
             null,
+
           paymentId:
             paymentId ||
             null,
+
           plan:
-            plan.key
+            plan.key,
         };
       }
 
 
       /*
-       * TESTE:
-       *
-       * Não altera nenhum aluno real.
+       * TESTE NÃO ALTERA ALUNO
        */
 
       if (
@@ -1553,12 +1978,17 @@ async function processSubscriptionPayment({
       ) {
         await updateEventResult(
           client,
+
           environmentName,
+
           eventKey,
+
           {
-            processed: true,
+            processed:
+              true,
+
             result:
-              "dry_run_test"
+              "dry_run_test",
           }
         );
 
@@ -1566,37 +1996,36 @@ async function processSubscriptionPayment({
           "COMMIT"
         );
 
-        console.log(
-          "PAGAMENTO TESTE VALIDADO - DRY RUN:",
-          JSON.stringify({
-            paymentId,
-            subscriptionId,
-            payerEmail,
-            plan:
-              plan.key
-          })
-        );
-
         return {
-          ok: true,
-          processed: true,
-          dryRun: true,
-          duplicate: false,
+          ok:
+            true,
+
+          processed:
+            true,
+
+          dryRun:
+            true,
+
+          duplicate:
+            false,
+
           result:
             "dry_run_test",
+
           paymentId:
             paymentId ||
             null,
+
           payerEmail,
+
           plan:
-            plan.key
+            plan.key,
         };
       }
 
 
       /*
-       * PRODUÇÃO:
-       * localizar aluno.
+       * PROCURAR ALUNO
        */
 
       const lookup =
@@ -1605,53 +2034,6 @@ async function processSubscriptionPayment({
           externalReference,
           payerEmail
         );
-
-
-      /*
-       * NÃO ENCONTROU
-       */
-
-      if (
-        lookup.status ===
-        "not_found"
-      ) {
-        await updateEventResult(
-          client,
-          environmentName,
-          eventKey,
-          {
-            processed: false,
-            result:
-              "student_not_found"
-          }
-        );
-
-        await client.query(
-          "COMMIT"
-        );
-
-        console.warn(
-          "ALUNO NÃO ENCONTRADO:",
-          JSON.stringify({
-            paymentId,
-            payerEmail,
-            externalReference,
-            plan:
-              plan.key
-          })
-        );
-
-        return {
-          ok: true,
-          processed: false,
-          result:
-            "student_not_found",
-          payerEmail,
-          paymentId:
-            paymentId ||
-            null
-        };
-      }
 
 
       /*
@@ -1664,12 +2046,17 @@ async function processSubscriptionPayment({
       ) {
         await updateEventResult(
           client,
+
           environmentName,
+
           eventKey,
+
           {
-            processed: false,
+            processed:
+              false,
+
             result:
-              "duplicate_student_email"
+              "duplicate_student_email",
           }
         );
 
@@ -1677,126 +2064,208 @@ async function processSubscriptionPayment({
           "COMMIT"
         );
 
-        console.warn(
-          "E-MAIL DUPLICADO NO PROSHAPE:",
-          payerEmail
-        );
-
         return {
-          ok: true,
-          processed: false,
+          ok:
+            true,
+
+          processed:
+            false,
+
           result:
             "duplicate_student_email",
-          payerEmail
+
+          payerEmail,
         };
       }
 
 
-      const student =
-        lookup.student;
-
       const today =
         todayBrazil();
 
-      const oldExpiry =
-        dateOnly(
-          student.expires_at
-        );
+      let finalStudent;
 
-      const nextPaymentDate =
-        dateOnly(
-          subscription
-            ?.nextPaymentDate
-        );
+      let resultCode;
+
+      let lookupMethod;
 
 
       /*
-       * DEFINIR NOVO VENCIMENTO
+       * PRIMEIRO PAGAMENTO
        *
-       * Preferência:
-       * próxima cobrança do Mercado Pago.
-       *
-       * Fallback:
-       * 30 / 90 / 365 dias.
+       * CRIA O ALUNO.
        */
 
-      let newExpiry;
-
       if (
-        nextPaymentDate &&
-        nextPaymentDate > today
+        lookup.status ===
+        "not_found"
       ) {
-        newExpiry =
-          latestDate(
-            oldExpiry,
-            nextPaymentDate
-          );
-      } else {
-        const base =
-          oldExpiry &&
-          oldExpiry >= today
-            ? oldExpiry
-            : today;
+        if (
+          !payerEmail
+        ) {
+          await updateEventResult(
+            client,
 
-        newExpiry =
-          addDays(
-            base,
+            environmentName,
+
+            eventKey,
+
+            {
+              processed:
+                false,
+
+              result:
+                "student_not_found_and_email_missing",
+            }
+          );
+
+          await client.query(
+            "COMMIT"
+          );
+
+          return {
+            ok:
+              true,
+
+            processed:
+              false,
+
+            result:
+              "student_not_found_and_email_missing",
+          };
+        }
+
+
+        const newExpiry =
+          calculateNewExpiry(
+            null,
+
+            subscription
+              ?.nextPaymentDate,
+
             plan.days
           );
+
+
+        finalStudent =
+          await createStudentFromPayment(
+            client,
+
+            {
+              payment,
+
+              payerEmail,
+
+              plan,
+
+              paidAt:
+                today,
+
+              expiresAt:
+                newExpiry,
+            }
+          );
+
+
+        resultCode =
+          "student_created_and_access_released";
+
+        lookupMethod =
+          "created_from_payment";
       }
 
 
       /*
-       * ATUALIZAR ALUNO
+       * ALUNO JÁ EXISTE
+       *
+       * RENOVA.
        */
 
-      const updatedResult =
-        await client.query(
-          `
-            UPDATE students
-            SET
-              paid_at = $1,
-              expires_at = $2,
-              blocked = FALSE,
-              updated_at = NOW()
-            WHERE
-              id = $3
-            RETURNING
-              id,
-              name,
-              code,
-              email,
-              paid_at,
-              expires_at,
-              blocked
-          `,
-          [
-            today,
-            newExpiry,
-            student.id
-          ]
-        );
+      else {
+        const student =
+          lookup.student;
 
-      const updatedStudent =
-        updatedResult.rows[0];
+        const newExpiry =
+          calculateNewExpiry(
+            student
+              .expires_at,
+
+            subscription
+              ?.nextPaymentDate,
+
+            plan.days
+          );
+
+
+        const updated =
+          await client.query(
+            `
+              UPDATE students
+              SET
+                paid_at = $1,
+                expires_at = $2,
+                blocked = FALSE,
+                monthly_value = $3,
+                updated_at = NOW()
+              WHERE
+                id = $4
+              RETURNING
+                id,
+                name,
+                code,
+                email,
+                paid_at,
+                expires_at,
+                blocked
+            `,
+            [
+              today,
+
+              newExpiry,
+
+              String(
+                plan.monthlyValue
+              ),
+
+              student.id,
+            ]
+          );
+
+
+        finalStudent =
+          updated
+            .rows[0];
+
+        resultCode =
+          "access_renewed";
+
+        lookupMethod =
+          lookup.method;
+      }
 
 
       /*
-       * MARCAR EVENTO COMO PROCESSADO
+       * FINALIZAR EVENTO
        */
 
       await updateEventResult(
         client,
+
         environmentName,
+
         eventKey,
+
         {
-          processed: true,
+          processed:
+            true,
+
           result:
-            "access_renewed",
+            resultCode,
+
           studentId:
-            student.id
+            finalStudent.id,
         }
       );
+
 
       await client.query(
         "COMMIT"
@@ -1808,47 +2277,63 @@ async function processSubscriptionPayment({
        */
 
       console.log(
-        "ACESSO PROSHAPE RENOVADO:",
+        resultCode ===
+          "student_created_and_access_released"
+
+          ? "NOVO ALUNO PROSHAPE CRIADO E LIBERADO:"
+
+          : "ACESSO PROSHAPE RENOVADO:",
+
         JSON.stringify({
           studentId:
-            updatedStudent.id,
+            finalStudent.id,
 
           studentName:
-            updatedStudent.name,
+            finalStudent.name,
 
-          lookupMethod:
-            lookup.method,
+          code:
+            finalStudent.code,
 
           payerEmail,
 
-          paymentId,
-
-          subscriptionId,
+          lookupMethod,
 
           plan:
             plan.key,
 
+          paymentId:
+            paymentId ||
+            null,
+
+          subscriptionId:
+            subscriptionId ||
+            null,
+
           paidAt:
-            updatedStudent.paid_at,
+            finalStudent
+              .paid_at,
 
           expiresAt:
-            updatedStudent.expires_at
+            finalStudent
+              .expires_at,
         })
       );
 
 
       return {
-        ok: true,
+        ok:
+          true,
 
-        processed: true,
+        processed:
+          true,
 
-        duplicate: false,
+        duplicate:
+          false,
 
         result:
-          "access_renewed",
+          resultCode,
 
-        lookupMethod:
-          lookup.method,
+        lookupMethod,
 
         paymentId:
           paymentId ||
@@ -1863,29 +2348,33 @@ async function processSubscriptionPayment({
 
         student: {
           id:
-            updatedStudent.id,
+            finalStudent.id,
 
           name:
-            updatedStudent.name,
+            finalStudent.name,
 
           code:
-            updatedStudent.code,
+            finalStudent.code,
 
           email:
-            updatedStudent.email,
+            finalStudent.email,
 
           paidAt:
-            updatedStudent.paid_at,
+            finalStudent
+              .paid_at,
 
           expiresAt:
-            updatedStudent.expires_at,
+            finalStudent
+              .expires_at,
 
           blocked:
-            updatedStudent.blocked
-        }
+            finalStudent.blocked,
+        },
       };
 
-    } catch (error) {
+    } catch (
+      error
+    ) {
       await client.query(
         "ROLLBACK"
       );
@@ -1897,9 +2386,355 @@ async function processSubscriptionPayment({
     try {
       await client.end();
     } catch {
-      // Sem ação.
+      // sem ação
     }
   }
+}
+
+
+/*
+ * ============================================================
+ * COBRANÇA AUTORIZADA
+ * ============================================================
+ */
+
+async function processAuthorizedPaymentEvent(
+  dataId,
+  environment,
+  env,
+  topic
+) {
+  const rawAuthorized =
+    await getAuthorizedPayment(
+      dataId,
+
+      environment
+        .accessToken
+    );
+
+
+  const authorizedPayment =
+    authorizedPaymentSummary(
+      rawAuthorized
+    );
+
+
+  /*
+   * PAGAMENTO
+   */
+
+  let payment =
+    null;
+
+  if (
+    authorizedPayment
+      .paymentId
+  ) {
+    const rawPayment =
+      await getPayment(
+        authorizedPayment
+          .paymentId,
+
+        environment
+          .accessToken
+      );
+
+    payment =
+      paymentSummary(
+        rawPayment
+      );
+  }
+
+
+  /*
+   * ASSINATURA
+   */
+
+  let subscription =
+    null;
+
+  if (
+    authorizedPayment
+      .preapprovalId
+  ) {
+    const rawSubscription =
+      await getSubscription(
+        authorizedPayment
+          .preapprovalId,
+
+        environment
+          .accessToken
+      );
+
+    subscription =
+      subscriptionSummary(
+        rawSubscription
+      );
+  }
+
+
+  /*
+   * PLANO
+   */
+
+  const plan =
+    identifyPlan(
+      environment.name,
+
+      subscription
+        ?.planId
+    );
+
+
+  const planValidation =
+    validatePlan(
+      plan,
+
+      subscription
+    );
+
+
+  /*
+   * AUTOMAÇÃO
+   */
+
+  const automation =
+    await processSubscriptionPayment({
+      env,
+
+      environmentName:
+        environment.name,
+
+      topic,
+
+      authorizedPayment,
+
+      payment,
+
+      subscription,
+
+      plan,
+
+      planValidation,
+    });
+
+
+  return {
+    authorizedPayment,
+
+    payment,
+
+    subscription,
+
+    plan,
+
+    planValidation,
+
+    automation,
+  };
+}
+
+
+/*
+ * ============================================================
+ * FALLBACK PELO EVENTO PAYMENT
+ * ============================================================
+ */
+
+async function processPaymentEvent(
+  dataId,
+  environment,
+  env
+) {
+  const rawPayment =
+    await getPayment(
+      dataId,
+
+      environment
+        .accessToken
+    );
+
+
+  const payment =
+    paymentSummary(
+      rawPayment
+    );
+
+
+  /*
+   * SOMENTE APROVADO
+   */
+
+  if (
+    payment.status !==
+    "approved"
+  ) {
+    return {
+      payment,
+
+      automation: {
+        processed:
+          false,
+
+        reason:
+          "payment_not_approved",
+      },
+    };
+  }
+
+
+  /*
+   * PROCURAR COBRANÇA AUTORIZADA
+   */
+
+  const search =
+    await searchAuthorizedPaymentByPaymentId(
+      payment.id,
+
+      environment
+        .accessToken
+    );
+
+
+  const candidates =
+    Array.isArray(
+      search?.results
+    )
+      ? search.results
+      : [];
+
+
+  const rawAuthorized =
+    candidates.find(
+      (
+        item
+      ) =>
+        String(
+          item
+            ?.payment
+            ?.id ??
+          ""
+        ) ===
+        String(
+          payment.id
+        )
+    );
+
+
+  /*
+   * NÃO É PAGAMENTO DE ASSINATURA
+   */
+
+  if (
+    !rawAuthorized
+  ) {
+    return {
+      payment,
+
+      automation: {
+        processed:
+          false,
+
+        reason:
+          "payment_not_linked_to_subscription",
+      },
+    };
+  }
+
+
+  const authorizedPayment =
+    authorizedPaymentSummary(
+      rawAuthorized
+    );
+
+
+  /*
+   * ASSINATURA
+   */
+
+  let subscription =
+    null;
+
+  if (
+    authorizedPayment
+      .preapprovalId
+  ) {
+    const rawSubscription =
+      await getSubscription(
+        authorizedPayment
+          .preapprovalId,
+
+        environment
+          .accessToken
+      );
+
+    subscription =
+      subscriptionSummary(
+        rawSubscription
+      );
+  }
+
+
+  /*
+   * PLANO
+   */
+
+  const plan =
+    identifyPlan(
+      environment.name,
+
+      subscription
+        ?.planId
+    );
+
+
+  const planValidation =
+    validatePlan(
+      plan,
+
+      subscription
+    );
+
+
+  /*
+   * PROCESSAR
+   */
+
+  const automation =
+    await processSubscriptionPayment({
+      env,
+
+      environmentName:
+        environment.name,
+
+      topic:
+        "payment",
+
+      authorizedPayment,
+
+      payment,
+
+      subscription,
+
+      plan,
+
+      planValidation,
+    });
+
+
+  return {
+    payment,
+
+    authorizedPayment,
+
+    subscription,
+
+    plan,
+
+    planValidation,
+
+    automation,
+  };
 }
 
 
@@ -1910,25 +2745,39 @@ async function processSubscriptionPayment({
  */
 
 export default {
-  async fetch(request, env) {
+  async fetch(
+    request,
+    env
+  ) {
     const url =
-      new URL(request.url);
+      new URL(
+        request.url
+      );
+
 
     /*
      * ========================================================
-     * HEALTH CHECK
+     * DB HEALTH
      * ========================================================
      */
 
     if (
-      request.method === "GET" &&
+      request.method ===
+        "GET" &&
+
       url.pathname
-        .replace(/\/+$/, "") ===
+        .replace(
+          /\/+$/,
+          ""
+        ) ===
         "/db-health"
     ) {
       try {
         const connected =
-          await checkDatabase(env);
+          await checkDatabase(
+            env
+          );
+
 
         return jsonResponse({
           ok:
@@ -1943,27 +2792,39 @@ export default {
               : "not-connected",
 
           hyperdrive:
-            "PROSHAPE_DB"
+            "PROSHAPE_DB",
         });
 
-      } catch (error) {
+      } catch (
+        error
+      ) {
         console.error(
           "Erro no banco:",
-          error instanceof Error
+
+          error instanceof
+            Error
             ? error.message
-            : String(error)
+            : String(
+                error
+              )
         );
+
 
         return jsonResponse(
           {
-            ok: false,
+            ok:
+              false,
+
             service:
               "ProShape Database",
+
             database:
               "error",
+
             error:
-              "Database connection failed"
+              "Database connection failed",
           },
+
           500
         );
       }
@@ -1990,10 +2851,12 @@ export default {
      */
 
     if (
-      request.method === "GET"
+      request.method ===
+      "GET"
     ) {
       return jsonResponse({
-        ok: true,
+        ok:
+          true,
 
         service:
           "ProShape Mercado Pago Webhook",
@@ -2013,8 +2876,10 @@ export default {
         automation:
           environment.name ===
             "test"
+
             ? "dry-run"
-            : "production"
+
+            : "create-or-renew-student",
       });
     }
 
@@ -2031,10 +2896,13 @@ export default {
     ) {
       return jsonResponse(
         {
-          ok: false,
+          ok:
+            false,
+
           error:
-            "Method Not Allowed"
+            "Method Not Allowed",
         },
+
         405
       );
     }
@@ -2051,20 +2919,32 @@ export default {
       const validSignature =
         await validateMercadoPagoSignature(
           request,
-          environment.webhookSecret,
+
+          environment
+            .webhookSecret,
+
           environment.name
         );
 
-      if (!validSignature) {
+
+      if (
+        !validSignature
+      ) {
         return jsonResponse(
           {
-            received: false,
-            validated: false,
+            received:
+              false,
+
+            validated:
+              false,
+
             environment:
               environment.name,
+
             error:
-              "Invalid signature"
+              "Invalid signature",
           },
+
           401
         );
       }
@@ -2076,20 +2956,28 @@ export default {
        * ======================================================
        */
 
-      let body = {};
+      let body =
+        {};
 
       try {
         body =
           await request.json();
       } catch {
         return jsonResponse({
-          received: true,
-          validated: true,
+          received:
+            true,
+
+          validated:
+            true,
+
           environment:
             environment.name,
-          processed: false,
+
+          processed:
+            false,
+
           reason:
-            "Body JSON inválido ou vazio"
+            "Body JSON inválido ou vazio",
         });
       }
 
@@ -2105,28 +2993,40 @@ export default {
           "type"
         ) || "";
 
+
       const bodyType =
-        body?.type || "";
+        body?.type ||
+        "";
+
 
       const topic =
         queryType ||
         bodyType;
 
+
       const entity =
-        body?.entity || "";
+        body?.entity ||
+        "";
+
 
       const action =
-        body?.action || "";
+        body?.action ||
+        "";
+
 
       const queryDataId =
         url.searchParams.get(
           "data.id"
         );
 
+
       const bodyDataId =
-        body?.data?.id ??
+        body
+          ?.data
+          ?.id ??
         body?.id ??
         null;
+
 
       const dataId =
         queryDataId ||
@@ -2134,15 +3034,21 @@ export default {
 
 
       console.log(
-        "Webhook recebido:",
+        "Webhook Mercado Pago recebido:",
+
         JSON.stringify({
           environment:
             environment.name,
+
           topic,
+
           bodyType,
+
           entity,
+
           action,
-          dataId
+
+          dataId,
         })
       );
 
@@ -2153,58 +3059,63 @@ export default {
        * ======================================================
        */
 
-      if (!dataId) {
+      if (
+        !dataId
+      ) {
         return jsonResponse({
-          received: true,
-          validated: true,
+          received:
+            true,
+
+          validated:
+            true,
+
           environment:
             environment.name,
-          processed: false,
+
+          processed:
+            false,
+
           reason:
-            "Evento sem data.id"
+            "Evento sem data.id",
         });
       }
 
 
       /*
        * ======================================================
-       * SIMULADOR MERCADO PAGO
-       * ======================================================
-       *
-       * O simulador usa 123456.
-       * Não consulta a API real.
+       * SIMULADOR
        * ======================================================
        */
 
       if (
-        String(dataId) ===
+        String(
+          dataId
+        ) ===
         "123456"
       ) {
-        console.log(
-          "Simulação Mercado Pago aceita:",
-          JSON.stringify({
-            environment:
-              environment.name,
-            topic,
-            dataId
-          })
-        );
-
         return jsonResponse({
-          received: true,
-          validated: true,
-          simulated: true,
+          received:
+            true,
+
+          validated:
+            true,
+
+          simulated:
+            true,
+
           environment:
             environment.name,
+
           topic,
-          dataId
+
+          dataId,
         });
       }
 
 
       /*
        * ======================================================
-       * PAGAMENTO RECORRENTE DA ASSINATURA
+       * PAGAMENTO AUTORIZADO DE ASSINATURA
        * ======================================================
        */
 
@@ -2212,153 +3123,35 @@ export default {
         topic ===
         "subscription_authorized_payment"
       ) {
-        const authorizedPaymentRaw =
-          await getAuthorizedPayment(
+        const result =
+          await processAuthorizedPaymentEvent(
             dataId,
-            environment.accessToken
-          );
 
-        const authorizedPayment =
-          authorizedPaymentSummary(
-            authorizedPaymentRaw
-          );
+            environment,
 
-
-        /*
-         * PAGAMENTO
-         */
-
-        let payment = null;
-
-        if (
-          authorizedPayment.paymentId
-        ) {
-          const rawPayment =
-            await getPayment(
-              authorizedPayment.paymentId,
-              environment.accessToken
-            );
-
-          payment =
-            paymentSummary(
-              rawPayment
-            );
-        }
-
-
-        /*
-         * ASSINATURA
-         */
-
-        let subscription = null;
-
-        if (
-          authorizedPayment.preapprovalId
-        ) {
-          const rawSubscription =
-            await getSubscription(
-              authorizedPayment.preapprovalId,
-              environment.accessToken
-            );
-
-          subscription =
-            subscriptionSummary(
-              rawSubscription
-            );
-        }
-
-
-        /*
-         * PLANO
-         */
-
-        const plan =
-          identifyPlan(
-            environment.name,
-            subscription?.planId
-          );
-
-        const planValidation =
-          validatePlan(
-            plan,
-            subscription
-          );
-
-
-        /*
-         * AUTOMAÇÃO
-         */
-
-        const automation =
-          await processSubscriptionPayment({
             env,
 
-            environmentName:
-              environment.name,
-
-            topic,
-
-            authorizedPayment,
-
-            payment,
-
-            subscription,
-
-            plan,
-
-            planValidation
-          });
-
-
-        console.log(
-          "Resultado automação:",
-          JSON.stringify({
-            environment:
-              environment.name,
-
-            paymentId:
-              payment?.id ??
-              authorizedPayment
-                .paymentId ??
-              null,
-
-            subscriptionId:
-              subscription?.id ??
-              null,
-
-            plan:
-              plan?.key ??
-              null,
-
-            automation
-          })
-        );
+            topic
+          );
 
 
         return jsonResponse({
-          received: true,
+          received:
+            true,
 
-          validated: true,
+          validated:
+            true,
 
           environment:
             environment.name,
 
-          processed: true,
+          processed:
+            true,
 
           resource:
             "subscription_authorized_payment",
 
-          authorizedPayment,
-
-          payment,
-
-          subscription,
-
-          plan,
-
-          planValidation,
-
-          automation
+          ...result,
         });
       }
 
@@ -2368,68 +3161,66 @@ export default {
        * PAYMENT
        * ======================================================
        *
-       * Consultamos e registramos.
+       * FALLBACK SEGURO.
        *
-       * Não renovamos por esta notificação para evitar
-       * duplicidade com subscription_authorized_payment.
+       * SE FOR PAGAMENTO DE ASSINATURA,
+       * CRIA OU RENOVA.
+       *
+       * IDEMPOTÊNCIA PELO paymentId
+       * IMPEDE PROCESSAMENTO DUPLO.
        * ======================================================
        */
 
       if (
-        topic === "payment" ||
-        bodyType === "payment" ||
+        topic ===
+          "payment" ||
+
+        bodyType ===
+          "payment" ||
+
         action.startsWith(
           "payment."
         )
       ) {
-        const rawPayment =
-          await getPayment(
+        const result =
+          await processPaymentEvent(
             dataId,
-            environment.accessToken
+
+            environment,
+
+            env
           );
 
-        const payment =
-          paymentSummary(
-            rawPayment
-          );
-
-        console.log(
-          "Pagamento consultado:",
-          JSON.stringify({
-            environment:
-              environment.name,
-            ...payment
-          })
-        );
 
         return jsonResponse({
-          received: true,
+          received:
+            true,
 
-          validated: true,
+          validated:
+            true,
 
           environment:
             environment.name,
 
-          processed: true,
+          processed:
+            true,
 
           resource:
             "payment",
 
-          payment,
-
-          automation: {
-            processed: false,
-
-            reason:
-              "Renovação executada somente por subscription_authorized_payment para evitar duplicidade."
-          }
+          ...result,
         });
       }
 
 
       /*
        * ======================================================
-       * PREAPPROVAL / ASSINATURA
+       * PREAPPROVAL
+       * ======================================================
+       *
+       * NÃO LIBERA ACESSO.
+       *
+       * SOMENTE PAGAMENTO APROVADO LIBERA.
        * ======================================================
        */
 
@@ -2446,59 +3237,47 @@ export default {
         const rawSubscription =
           await getSubscription(
             dataId,
-            environment.accessToken
+
+            environment
+              .accessToken
           );
+
 
         const subscription =
           subscriptionSummary(
             rawSubscription
           );
 
+
         const plan =
           identifyPlan(
             environment.name,
-            subscription.planId
+
+            subscription
+              .planId
           );
+
 
         const planValidation =
           validatePlan(
             plan,
+
             subscription
           );
 
-        console.log(
-          "Assinatura consultada:",
-          JSON.stringify({
-            environment:
-              environment.name,
-
-            subscriptionId:
-              subscription.id,
-
-            status:
-              subscription.status,
-
-            payerEmail:
-              subscription.payerEmail,
-
-            plan:
-              plan?.key ??
-              null,
-
-            planValid:
-              planValidation.valid
-          })
-        );
 
         return jsonResponse({
-          received: true,
+          received:
+            true,
 
-          validated: true,
+          validated:
+            true,
 
           environment:
             environment.name,
 
-          processed: true,
+          processed:
+            true,
 
           resource:
             "subscription",
@@ -2510,11 +3289,12 @@ export default {
           planValidation,
 
           automation: {
-            processed: false,
+            processed:
+              false,
 
             reason:
-              "Autorização da assinatura não libera acesso. A renovação ocorre quando a cobrança recorrente estiver aprovada."
-          }
+              "Acesso é liberado somente após pagamento aprovado.",
+          },
         });
       }
 
@@ -2530,26 +3310,25 @@ export default {
           "subscription_"
         )
       ) {
-        console.log(
-          "Evento de assinatura recebido:",
-          JSON.stringify({
-            environment:
-              environment.name,
-            topic,
-            dataId
-          })
-        );
-
         return jsonResponse({
-          received: true,
-          validated: true,
+          received:
+            true,
+
+          validated:
+            true,
+
           environment:
             environment.name,
-          processed: true,
+
+          processed:
+            true,
+
           resource:
             "subscription_event",
+
           topic,
-          dataId
+
+          dataId,
         });
       }
 
@@ -2560,39 +3339,43 @@ export default {
        * ======================================================
        */
 
-      console.log(
-        "Evento válido não utilizado:",
-        JSON.stringify({
-          environment:
-            environment.name,
-          topic,
-          entity,
-          action,
-          dataId
-        })
-      );
-
       return jsonResponse({
-        received: true,
-        validated: true,
+        received:
+          true,
+
+        validated:
+          true,
+
         environment:
           environment.name,
-        processed: false,
+
+        processed:
+          false,
+
         reason:
-          "Evento não utilizado pela ProShape"
+          "Evento não utilizado pela ProShape",
       });
 
-    } catch (error) {
+    } catch (
+      error
+    ) {
       console.error(
         "Erro no webhook ProShape:",
-        error instanceof Error
-          ? error.message
-          : String(error)
+
+        error instanceof
+          Error
+          ? error.stack ||
+            error.message
+          : String(
+              error
+            )
       );
+
 
       return jsonResponse(
         {
-          received: false,
+          received:
+            false,
 
           environment:
             environment.name,
@@ -2601,12 +3384,16 @@ export default {
             "Webhook processing error",
 
           details:
-            error instanceof Error
+            error instanceof
+              Error
               ? error.message
-              : String(error)
+              : String(
+                  error
+                ),
         },
+
         500
       );
     }
-  }
+  },
 };
