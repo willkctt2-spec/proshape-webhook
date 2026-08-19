@@ -89,6 +89,12 @@ const PROSHAPE_PLANS = {
   }
 };
 
+const PROSHAPE_PLAN_ACCESS_DAYS = {
+  mensal: 30,
+  trimestral: 90,
+  anual: 365
+};
+
 
 /*
  * ============================================================
@@ -583,6 +589,23 @@ async function getPayment(
 
 /*
  * ============================================================
+ * CONSULTAR PAGAMENTO AUTORIZADO DA ASSINATURA
+ * ============================================================
+ */
+
+async function getAuthorizedPayment(
+  id,
+  accessToken
+) {
+  return mercadoPagoGet(
+    `/authorized_payments/${encodeURIComponent(id)}`,
+    accessToken
+  );
+}
+
+
+/*
+ * ============================================================
  * CONSULTAR ASSINATURA
  * ============================================================
  */
@@ -660,8 +683,77 @@ function paymentSummary(
       payment?.date_approved ??
       null,
 
+    operationType:
+      payment?.operation_type ??
+      null,
+
     paymentMethod:
       payment?.payment_method_id ??
+      null
+  };
+}
+
+
+/*
+ * ============================================================
+ * RESUMO PAGAMENTO AUTORIZADO
+ * ============================================================
+ */
+
+function authorizedPaymentSummary(
+  authorizedPayment
+) {
+  return {
+    id:
+      authorizedPayment?.id ??
+      null,
+
+    status:
+      authorizedPayment?.status ??
+      null,
+
+    summarized:
+      authorizedPayment?.summarized ??
+      null,
+
+    preapprovalId:
+      authorizedPayment?.preapproval_id ??
+      null,
+
+    reason:
+      authorizedPayment?.reason ??
+      null,
+
+    externalReference:
+      authorizedPayment?.external_reference ??
+      null,
+
+    currency:
+      authorizedPayment?.currency_id ??
+      null,
+
+    amount:
+      authorizedPayment?.transaction_amount ??
+      null,
+
+    debitDate:
+      authorizedPayment?.debit_date ??
+      null,
+
+    retryAttempt:
+      authorizedPayment?.retry_attempt ??
+      null,
+
+    paymentId:
+      authorizedPayment?.payment?.id ??
+      null,
+
+    paymentStatus:
+      authorizedPayment?.payment?.status ??
+      null,
+
+    paymentStatusDetail:
+      authorizedPayment?.payment?.status_detail ??
       null
   };
 }
@@ -838,6 +930,945 @@ function validatePlanConfiguration(
   };
 }
 
+
+
+/*
+ * ============================================================
+ * AUTOMAÇÃO DE ACESSO PROSHAPE
+ * ============================================================
+ *
+ * Fonte de verdade para liberar/renovar acesso:
+ * subscription_authorized_payment com pagamento aprovado.
+ *
+ * Produção:
+ *   atualiza o aluno.
+ *
+ * Teste:
+ *   DRY-RUN. Não altera acesso de aluno real.
+ *
+ * Idempotência:
+ *   tabela proshape_payment_events evita renovar duas vezes
+ *   quando o Mercado Pago reenviar a mesma notificação.
+ * ============================================================
+ */
+
+function normalizeEmail(
+  value
+) {
+  return String(
+    value ?? ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+
+function brazilToday() {
+  const parts =
+    new Intl.DateTimeFormat(
+      "en-CA",
+      {
+        timeZone:
+          "America/Sao_Paulo",
+
+        year:
+          "numeric",
+
+        month:
+          "2-digit",
+
+        day:
+          "2-digit"
+      }
+    )
+      .formatToParts(
+        new Date()
+      );
+
+  const values =
+    Object.fromEntries(
+      parts.map(
+        (part) => [
+          part.type,
+          part.value
+        ]
+      )
+    );
+
+  return (
+    `${values.year}-${values.month}-${values.day}`
+  );
+}
+
+
+function dateOnlyFromIso(
+  value
+) {
+  const text =
+    String(
+      value ?? ""
+    );
+
+  const match =
+    text.match(
+      /^(\d{4}-\d{2}-\d{2})/
+    );
+
+  return (
+    match?.[1] ??
+    null
+  );
+}
+
+
+function addDaysToDateOnly(
+  dateString,
+  days
+) {
+  const safeDays =
+    Math.max(
+      1,
+      Math.min(
+        3660,
+        Math.floor(
+          Number(days) ||
+          0
+        )
+      )
+    );
+
+  const date =
+    new Date(
+      `${dateString}T12:00:00.000Z`
+    );
+
+  date.setUTCDate(
+    date.getUTCDate() +
+    safeDays
+  );
+
+  return date
+    .toISOString()
+    .slice(
+      0,
+      10
+    );
+}
+
+
+function laterDateOnly(
+  a,
+  b
+) {
+  if (!a) {
+    return b ?? null;
+  }
+
+  if (!b) {
+    return a ?? null;
+  }
+
+  return (
+    String(a) >=
+    String(b)
+  )
+    ? String(a)
+    : String(b);
+}
+
+
+function planAccessDays(
+  plan
+) {
+  return (
+    PROSHAPE_PLAN_ACCESS_DAYS[
+      plan?.key
+    ] ??
+    0
+  );
+}
+
+
+async function createDatabaseClient(
+  env
+) {
+  if (
+    !env.PROSHAPE_DB
+      ?.connectionString
+  ) {
+    throw new Error(
+      "Binding PROSHAPE_DB não configurada"
+    );
+  }
+
+  const client =
+    new Client({
+      connectionString:
+        env.PROSHAPE_DB
+          .connectionString
+    });
+
+  await client.connect();
+
+  return client;
+}
+
+
+async function ensurePaymentEventsTable(
+  client
+) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS proshape_payment_events (
+      environment TEXT NOT NULL,
+      event_key TEXT NOT NULL,
+      topic TEXT NOT NULL,
+      authorized_payment_id TEXT,
+      payment_id TEXT,
+      subscription_id TEXT,
+      payer_email TEXT,
+      plan_key TEXT,
+      plan_name TEXT,
+      amount NUMERIC(10, 2),
+      currency TEXT,
+      payment_status TEXT,
+      student_id TEXT,
+      processed BOOLEAN NOT NULL DEFAULT FALSE,
+      result TEXT NOT NULL DEFAULT 'received',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (environment, event_key)
+    )
+  `);
+
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS
+      proshape_payment_events_student_idx
+    ON proshape_payment_events (student_id)
+  `);
+
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS
+      proshape_payment_events_payment_idx
+    ON proshape_payment_events (payment_id)
+  `);
+}
+
+
+async function processProShapeSubscriptionPayment({
+  env,
+  environmentName,
+  topic,
+  authorizedPaymentSummaryData,
+  paymentSummaryData,
+  subscriptionSummaryData,
+  plan,
+  planValidation
+}) {
+  const authorizedPaymentId =
+    authorizedPaymentSummaryData?.id
+      ? String(
+          authorizedPaymentSummaryData.id
+        )
+      : "";
+
+  const paymentId =
+    paymentSummaryData?.id
+      ? String(
+          paymentSummaryData.id
+        )
+      :
+      authorizedPaymentSummaryData
+        ?.paymentId
+        ? String(
+            authorizedPaymentSummaryData
+              .paymentId
+          )
+        : "";
+
+  const subscriptionId =
+    subscriptionSummaryData?.id
+      ? String(
+          subscriptionSummaryData.id
+        )
+      :
+      authorizedPaymentSummaryData
+        ?.preapprovalId
+        ? String(
+            authorizedPaymentSummaryData
+              .preapprovalId
+          )
+        : "";
+
+  const eventKey =
+    paymentId
+      ? `payment:${paymentId}`
+      :
+      authorizedPaymentId
+        ? `authorized:${authorizedPaymentId}`
+        : "";
+
+  if (!eventKey) {
+    return {
+      ok:
+        false,
+
+      processed:
+        false,
+
+      reason:
+        "Evento sem identificador idempotente"
+    };
+  }
+
+
+  const paymentStatus =
+    paymentSummaryData?.status ??
+    authorizedPaymentSummaryData
+      ?.paymentStatus ??
+    null;
+
+  const payerEmail =
+    normalizeEmail(
+      subscriptionSummaryData
+        ?.payerEmail ??
+      paymentSummaryData
+        ?.payer?.email ??
+      ""
+    );
+
+  const amount =
+    Number(
+      paymentSummaryData?.amount ??
+      authorizedPaymentSummaryData
+        ?.amount ??
+      0
+    );
+
+  const currency =
+    paymentSummaryData?.currency ??
+    authorizedPaymentSummaryData
+      ?.currency ??
+    null;
+
+
+  /*
+   * Segurança:
+   * nunca libera acesso sem pagamento aprovado.
+   */
+
+  if (
+    paymentStatus !==
+    "approved"
+  ) {
+    return {
+      ok:
+        true,
+
+      processed:
+        false,
+
+      reason:
+        "Pagamento ainda não aprovado",
+
+      paymentStatus
+    };
+  }
+
+
+  /*
+   * Segurança:
+   * nunca libera acesso de plano desconhecido/divergente.
+   */
+
+  if (
+    !plan ||
+    !planValidation?.valid
+  ) {
+    return {
+      ok:
+        true,
+
+      processed:
+        false,
+
+      reason:
+        "Plano não identificado ou configuração divergente"
+    };
+  }
+
+
+  /*
+   * Segurança:
+   * moeda deve ser BRL para os planos atuais.
+   */
+
+  if (
+    currency &&
+    String(currency) !==
+    "BRL"
+  ) {
+    return {
+      ok:
+        true,
+
+      processed:
+        false,
+
+      reason:
+        "Moeda do pagamento inválida",
+
+      currency
+    };
+  }
+
+
+  if (!payerEmail) {
+    return {
+      ok:
+        true,
+
+      processed:
+        false,
+
+      reason:
+        "Pagamento sem e-mail do comprador"
+    };
+  }
+
+
+  const client =
+    await createDatabaseClient(
+      env
+    );
+
+  try {
+    await ensurePaymentEventsTable(
+      client
+    );
+
+    await client.query(
+      "BEGIN"
+    );
+
+    try {
+      /*
+       * Registrar ou recuperar evento.
+       */
+
+      await client.query(
+        `
+          INSERT INTO proshape_payment_events (
+            environment,
+            event_key,
+            topic,
+            authorized_payment_id,
+            payment_id,
+            subscription_id,
+            payer_email,
+            plan_key,
+            plan_name,
+            amount,
+            currency,
+            payment_status,
+            processed,
+            result,
+            updated_at
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10, $11, $12,
+            FALSE, 'received', NOW()
+          )
+          ON CONFLICT (environment, event_key)
+          DO UPDATE SET
+            topic = EXCLUDED.topic,
+            authorized_payment_id = EXCLUDED.authorized_payment_id,
+            payment_id = EXCLUDED.payment_id,
+            subscription_id = EXCLUDED.subscription_id,
+            payer_email = EXCLUDED.payer_email,
+            plan_key = EXCLUDED.plan_key,
+            plan_name = EXCLUDED.plan_name,
+            amount = EXCLUDED.amount,
+            currency = EXCLUDED.currency,
+            payment_status = EXCLUDED.payment_status,
+            updated_at = NOW()
+        `,
+        [
+          environmentName,
+          eventKey,
+          topic,
+          authorizedPaymentId ||
+            null,
+          paymentId ||
+            null,
+          subscriptionId ||
+            null,
+          payerEmail,
+          plan.key,
+          plan.name,
+          amount ||
+            null,
+          currency,
+          paymentStatus
+        ]
+      );
+
+
+      const eventResult =
+        await client.query(
+          `
+            SELECT
+              processed,
+              result,
+              student_id
+            FROM proshape_payment_events
+            WHERE
+              environment = $1
+              AND event_key = $2
+            FOR UPDATE
+          `,
+          [
+            environmentName,
+            eventKey
+          ]
+        );
+
+      const existingEvent =
+        eventResult.rows?.[0];
+
+
+      /*
+       * Idempotência:
+       * já processado = não soma dias novamente.
+       */
+
+      if (
+        existingEvent
+          ?.processed ===
+        true
+      ) {
+        await client.query(
+          "COMMIT"
+        );
+
+        return {
+          ok:
+            true,
+
+          processed:
+            true,
+
+          duplicate:
+            true,
+
+          result:
+            existingEvent.result,
+
+          studentId:
+            existingEvent.student_id ??
+            null,
+
+          paymentId:
+            paymentId ||
+            null,
+
+          plan:
+            plan.key
+        };
+      }
+
+
+      /*
+       * Ambiente de teste:
+       * valida tudo, mas NÃO altera alunos reais.
+       */
+
+      if (
+        environmentName !==
+        "production"
+      ) {
+        await client.query(
+          `
+            UPDATE proshape_payment_events
+            SET
+              processed = TRUE,
+              result = 'dry_run_test',
+              updated_at = NOW()
+            WHERE
+              environment = $1
+              AND event_key = $2
+          `,
+          [
+            environmentName,
+            eventKey
+          ]
+        );
+
+        await client.query(
+          "COMMIT"
+        );
+
+        return {
+          ok:
+            true,
+
+          processed:
+            true,
+
+          duplicate:
+            false,
+
+          dryRun:
+            true,
+
+          result:
+            "dry_run_test",
+
+          payerEmail,
+
+          paymentId:
+            paymentId ||
+            null,
+
+          plan:
+            plan.key
+        };
+      }
+
+
+      /*
+       * Localizar aluno por e-mail.
+       *
+       * LIMIT 2:
+       * se houver e-mail duplicado, não atualiza ninguém.
+       */
+
+      const studentsResult =
+        await client.query(
+          `
+            SELECT
+              id,
+              name,
+              code,
+              email,
+              paid_at,
+              expires_at,
+              blocked
+            FROM students
+            WHERE
+              LOWER(TRIM(email)) = $1
+            ORDER BY created_at ASC
+            LIMIT 2
+            FOR UPDATE
+          `,
+          [
+            payerEmail
+          ]
+        );
+
+
+      if (
+        studentsResult.rows.length ===
+        0
+      ) {
+        await client.query(
+          `
+            UPDATE proshape_payment_events
+            SET
+              processed = FALSE,
+              result = 'student_not_found',
+              updated_at = NOW()
+            WHERE
+              environment = $1
+              AND event_key = $2
+          `,
+          [
+            environmentName,
+            eventKey
+          ]
+        );
+
+        await client.query(
+          "COMMIT"
+        );
+
+        return {
+          ok:
+            true,
+
+          processed:
+            false,
+
+          result:
+            "student_not_found",
+
+          payerEmail,
+
+          paymentId:
+            paymentId ||
+            null,
+
+          plan:
+            plan.key
+        };
+      }
+
+
+      if (
+        studentsResult.rows.length >
+        1
+      ) {
+        await client.query(
+          `
+            UPDATE proshape_payment_events
+            SET
+              processed = FALSE,
+              result = 'duplicate_student_email',
+              updated_at = NOW()
+            WHERE
+              environment = $1
+              AND event_key = $2
+          `,
+          [
+            environmentName,
+            eventKey
+          ]
+        );
+
+        await client.query(
+          "COMMIT"
+        );
+
+        return {
+          ok:
+            true,
+
+          processed:
+            false,
+
+          result:
+            "duplicate_student_email",
+
+          payerEmail,
+
+          paymentId:
+            paymentId ||
+            null,
+
+          plan:
+            plan.key
+        };
+      }
+
+
+      const student =
+        studentsResult.rows[0];
+
+      const today =
+        brazilToday();
+
+      const currentExpiry =
+        dateOnlyFromIso(
+          student.expires_at
+        ) ??
+        (
+          student.expires_at
+            ? String(
+                student.expires_at
+              )
+            : null
+        );
+
+      const nextPaymentDate =
+        dateOnlyFromIso(
+          subscriptionSummaryData
+            ?.nextPaymentDate
+        );
+
+      /*
+       * Preferência:
+       * usar a próxima cobrança real do Mercado Pago.
+       *
+       * Fallback:
+       * 30/90/365 dias conforme plano.
+       */
+
+      let newExpiry =
+        null;
+
+      if (
+        nextPaymentDate &&
+        nextPaymentDate >=
+          today
+      ) {
+        newExpiry =
+          laterDateOnly(
+            currentExpiry,
+            nextPaymentDate
+          );
+      } else {
+        const baseDate =
+          currentExpiry &&
+          currentExpiry >=
+            today
+            ? currentExpiry
+            : today;
+
+        newExpiry =
+          addDaysToDateOnly(
+            baseDate,
+            planAccessDays(
+              plan
+            )
+          );
+      }
+
+
+      const updatedResult =
+        await client.query(
+          `
+            UPDATE students
+            SET
+              paid_at = $1,
+              expires_at = $2,
+              blocked = FALSE,
+              updated_at = NOW()
+            WHERE
+              id = $3
+            RETURNING
+              id,
+              name,
+              code,
+              email,
+              paid_at,
+              expires_at,
+              blocked
+          `,
+          [
+            today,
+            newExpiry,
+            student.id
+          ]
+        );
+
+      const updatedStudent =
+        updatedResult.rows[0];
+
+
+      await client.query(
+        `
+          UPDATE proshape_payment_events
+          SET
+            student_id = $1,
+            processed = TRUE,
+            result = 'access_renewed',
+            updated_at = NOW()
+          WHERE
+            environment = $2
+            AND event_key = $3
+        `,
+        [
+          student.id,
+          environmentName,
+          eventKey
+        ]
+      );
+
+
+      await client.query(
+        "COMMIT"
+      );
+
+
+      console.log(
+        "ACESSO PROSHAPE RENOVADO:",
+        JSON.stringify({
+          studentId:
+            updatedStudent.id,
+
+          studentName:
+            updatedStudent.name,
+
+          payerEmail,
+
+          plan:
+            plan.key,
+
+          paymentId:
+            paymentId ||
+            null,
+
+          paidAt:
+            updatedStudent.paid_at,
+
+          expiresAt:
+            updatedStudent.expires_at
+        })
+      );
+
+
+      return {
+        ok:
+          true,
+
+        processed:
+          true,
+
+        duplicate:
+          false,
+
+        result:
+          "access_renewed",
+
+        student: {
+          id:
+            updatedStudent.id,
+
+          name:
+            updatedStudent.name,
+
+          code:
+            updatedStudent.code,
+
+          email:
+            updatedStudent.email,
+
+          paidAt:
+            updatedStudent.paid_at,
+
+          expiresAt:
+            updatedStudent.expires_at,
+
+          blocked:
+            updatedStudent.blocked
+        },
+
+        payerEmail,
+
+        paymentId:
+          paymentId ||
+          null,
+
+        plan:
+          plan.key
+      };
+
+    } catch (error) {
+      await client.query(
+        "ROLLBACK"
+      );
+
+      throw error;
+    }
+
+  } finally {
+    try {
+      await client.end();
+    } catch {
+      // Nada a fazer.
+    }
+  }
+}
 
 
 /*
@@ -1313,6 +2344,17 @@ export default {
        * ======================================================
        * 6. PAGAMENTO AUTORIZADO DA ASSINATURA
        * ======================================================
+       *
+       * Este é o evento usado para liberar/renovar o acesso.
+       *
+       * Fluxo:
+       * authorized_payment
+       *      -> payment
+       *      -> preapproval
+       *      -> plano
+       *      -> aluno
+       *      -> renovação idempotente
+       * ======================================================
        */
 
       if (
@@ -1320,20 +2362,118 @@ export default {
         "subscription_authorized_payment"
       ) {
 
-        console.log(
-          "Pagamento recorrente de assinatura recebido:",
-          JSON.stringify({
+        const authorizedPayment =
+          await getAuthorizedPayment(
+            dataId,
+            environment.accessToken
+          );
 
+        const authorizedSummary =
+          authorizedPaymentSummary(
+            authorizedPayment
+          );
+
+
+        let payment =
+          null;
+
+        let paymentDataSummary =
+          null;
+
+
+        if (
+          authorizedSummary.paymentId
+        ) {
+          payment =
+            await getPayment(
+              authorizedSummary.paymentId,
+              environment.accessToken
+            );
+
+          paymentDataSummary =
+            paymentSummary(
+              payment
+            );
+        }
+
+
+        let subscription =
+          null;
+
+        let subscriptionDataSummary =
+          null;
+
+
+        if (
+          authorizedSummary.preapprovalId
+        ) {
+          subscription =
+            await getSubscription(
+              authorizedSummary.preapprovalId,
+              environment.accessToken
+            );
+
+          subscriptionDataSummary =
+            subscriptionSummary(
+              subscription
+            );
+        }
+
+
+        const plan =
+          identifyProShapePlan(
+            environment.name,
+            subscriptionDataSummary
+              ?.planId
+          );
+
+
+        const planValidation =
+          validatePlanConfiguration(
+            plan,
+            subscriptionDataSummary
+          );
+
+
+        const automation =
+          await processProShapeSubscriptionPayment({
+            env,
+            environmentName:
+              environment.name,
+            topic,
+            authorizedPaymentSummaryData:
+              authorizedSummary,
+            paymentSummaryData:
+              paymentDataSummary,
+            subscriptionSummaryData:
+              subscriptionDataSummary,
+            plan,
+            planValidation
+          });
+
+
+        console.log(
+          "Pagamento recorrente de assinatura processado:",
+          JSON.stringify({
             environment:
               environment.name,
 
-            topic,
+            authorizedPayment:
+              authorizedSummary,
 
-            bodyType,
+            payment:
+              paymentDataSummary,
 
-            action,
+            subscription:
+              subscriptionDataSummary,
 
-            dataId
+            plan:
+              plan?.key ??
+              null,
+
+            planValidation,
+
+            automation
           })
         );
 
@@ -1355,7 +2495,20 @@ export default {
           resource:
             "subscription_authorized_payment",
 
-          dataId
+          authorizedPayment:
+            authorizedSummary,
+
+          payment:
+            paymentDataSummary,
+
+          subscription:
+            subscriptionDataSummary,
+
+          plan,
+
+          planValidation,
+
+          automation
         });
       }
 
@@ -1443,7 +2596,15 @@ export default {
             "payment",
 
           payment:
-            summary
+            summary,
+
+          automation: {
+            processed:
+              false,
+
+            reason:
+              "A liberação automática usa subscription_authorized_payment para evitar duplicidade ou pagamento não relacionado."
+          }
         });
       }
 
@@ -1689,16 +2850,15 @@ export default {
 
           /*
            * ================================================
-           * PRÓXIMA ETAPA
+           * IMPORTANTE
            * ================================================
            *
-           * Aqui entraremos com:
+           * A assinatura autorizada, sozinha, NÃO libera
+           * acesso. A liberação ocorre somente quando chega
+           * subscription_authorized_payment com pagamento
+           * realmente aprovado.
            *
-           * - localizar cliente no ProShape
-           * - liberar acesso
-           * - registrar assinatura
-           * - enviar WhatsApp
-           *
+           * Isso evita liberar acesso sem cobrança aprovada.
            * ================================================
            */
         }
