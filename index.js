@@ -1,0 +1,1872 @@
+import { Client } from "pg";
+
+const encoder = new TextEncoder();
+
+
+/*
+ * ============================================================
+ * PROSHAPE - MERCADO PAGO WEBHOOK
+ * ============================================================
+ *
+ * /
+ *      PRODUÇÃO
+ *
+ * /test
+ *      TESTE
+ *
+ * ============================================================
+ */
+
+
+/*
+ * ============================================================
+ * PLANOS PROSHAPE
+ * ============================================================
+ *
+ * IMPORTANTE:
+ *
+ * Produção = Conta oficial ProShape
+ * Teste    = Conta vendedora de teste
+ *
+ * ============================================================
+ */
+
+const PROSHAPE_PLANS = {
+
+  production: {
+
+    d27387971674447895c70022508e5bb4: {
+      key: "mensal",
+      name: "ProShape Mensal",
+      amount: 29.90,
+      frequency: 1,
+      frequencyType: "months"
+    },
+
+    "19b9f24a0abf459386c5a706b18d0e9a": {
+      key: "trimestral",
+      name: "ProShape Trimestral",
+      amount: 84.90,
+      frequency: 3,
+      frequencyType: "months"
+    },
+
+    "153a4b17b65e445283b94a37fc4a5b0e": {
+      key: "anual",
+      name: "ProShape Anual",
+      amount: 299.90,
+      frequency: 12,
+      frequencyType: "months"
+    }
+  },
+
+
+  test: {
+
+    "0b787e8eb57c4fcdb615d2c7fa18a510": {
+      key: "mensal",
+      name: "ProShape Mensal",
+      amount: 29.90,
+      frequency: 1,
+      frequencyType: "months"
+    },
+
+    "69b9bf7b9b334157bd285392171316ea": {
+      key: "trimestral",
+      name: "ProShape Trimestral",
+      amount: 84.90,
+      frequency: 3,
+      frequencyType: "months"
+    },
+
+    "7fd0f1dcfdbb461e96c8f74cb66c81d4": {
+      key: "anual",
+      name: "ProShape Anual",
+      amount: 299.90,
+      frequency: 12,
+      frequencyType: "months"
+    }
+  }
+};
+
+
+/*
+ * ============================================================
+ * IDENTIFICAR PLANO
+ * ============================================================
+ */
+
+function identifyProShapePlan(
+  environmentName,
+  planId
+) {
+  if (!planId) {
+    return null;
+  }
+
+  const environmentPlans =
+    PROSHAPE_PLANS[
+      environmentName
+    ];
+
+  if (!environmentPlans) {
+    return null;
+  }
+
+  const plan =
+    environmentPlans[
+      String(planId)
+    ];
+
+  if (!plan) {
+    return null;
+  }
+
+  return {
+    id:
+      String(planId),
+
+    key:
+      plan.key,
+
+    name:
+      plan.name,
+
+    amount:
+      plan.amount,
+
+    frequency:
+      plan.frequency,
+
+    frequencyType:
+      plan.frequencyType
+  };
+}
+
+
+/*
+ * ============================================================
+ * RESPOSTA JSON
+ * ============================================================
+ */
+
+function jsonResponse(
+  data,
+  status = 200
+) {
+  return new Response(
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
+    {
+      status,
+
+      headers: {
+        "content-type":
+          "application/json; charset=UTF-8"
+      }
+    }
+  );
+}
+
+
+/*
+ * ============================================================
+ * PARSE X-SIGNATURE
+ * ============================================================
+ */
+
+function parseSignatureHeader(
+  header
+) {
+  const result = {
+    ts: "",
+    v1: ""
+  };
+
+  if (!header) {
+    return result;
+  }
+
+  for (
+    const part of
+    String(header).split(",")
+  ) {
+    const [
+      key,
+      ...valueParts
+    ] =
+      part
+        .trim()
+        .split("=");
+
+    const value =
+      valueParts.join("=");
+
+    if (key === "ts") {
+      result.ts =
+        value;
+    }
+
+    if (key === "v1") {
+      result.v1 =
+        value;
+    }
+  }
+
+  return result;
+}
+
+
+/*
+ * ============================================================
+ * HEX -> BYTES
+ * ============================================================
+ */
+
+function hexToBytes(
+  hex
+) {
+  if (!hex) {
+    return null;
+  }
+
+  const normalized =
+    String(hex)
+      .trim()
+      .toLowerCase();
+
+  if (
+    normalized.length === 0 ||
+    normalized.length % 2 !== 0 ||
+    !/^[0-9a-f]+$/.test(
+      normalized
+    )
+  ) {
+    return null;
+  }
+
+  const bytes =
+    new Uint8Array(
+      normalized.length / 2
+    );
+
+  for (
+    let i = 0;
+    i < normalized.length;
+    i += 2
+  ) {
+    bytes[i / 2] =
+      Number.parseInt(
+        normalized.slice(
+          i,
+          i + 2
+        ),
+        16
+      );
+  }
+
+  return bytes;
+}
+
+
+/*
+ * ============================================================
+ * VALIDAR ASSINATURA MERCADO PAGO
+ * ============================================================
+ */
+
+async function validateMercadoPagoSignature(
+  request,
+  secret,
+  environmentName
+) {
+  if (!secret) {
+    throw new Error(
+      `Webhook Secret não configurado para ${environmentName}`
+    );
+  }
+
+  const url =
+    new URL(
+      request.url
+    );
+
+  const xSignature =
+    request.headers.get(
+      "x-signature"
+    );
+
+  const xRequestId =
+    request.headers.get(
+      "x-request-id"
+    );
+
+  const {
+    ts,
+    v1
+  } =
+    parseSignatureHeader(
+      xSignature
+    );
+
+  if (
+    !ts ||
+    !v1
+  ) {
+    console.warn(
+      `Webhook ${environmentName}: x-signature ausente ou incompleto`
+    );
+
+    return false;
+  }
+
+
+  /*
+   * DATA ID
+   */
+
+  let dataId =
+    url.searchParams.get(
+      "data.id"
+    );
+
+  if (dataId) {
+    dataId =
+      String(dataId)
+        .toLowerCase();
+  }
+
+
+  /*
+   * MANIFESTO
+   */
+
+  let manifest = "";
+
+  if (dataId) {
+    manifest +=
+      `id:${dataId};`;
+  }
+
+  if (xRequestId) {
+    manifest +=
+      `request-id:${xRequestId};`;
+  }
+
+  manifest +=
+    `ts:${ts};`;
+
+
+  /*
+   * HMAC SHA-256
+   */
+
+  const key =
+    await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(
+        secret
+      ),
+      {
+        name:
+          "HMAC",
+
+        hash:
+          "SHA-256"
+      },
+      false,
+      [
+        "verify"
+      ]
+    );
+
+
+  const signatureBytes =
+    hexToBytes(
+      v1
+    );
+
+  if (!signatureBytes) {
+    console.warn(
+      `Webhook ${environmentName}: assinatura inválida`
+    );
+
+    return false;
+  }
+
+
+  const valid =
+    await crypto.subtle.verify(
+      "HMAC",
+      key,
+      signatureBytes,
+      encoder.encode(
+        manifest
+      )
+    );
+
+
+  /*
+   * LOG SEGURO
+   */
+
+  console.log(
+    "Validação Mercado Pago:",
+    JSON.stringify({
+      environment:
+        environmentName,
+
+      dataId:
+        dataId ?? null,
+
+      requestId:
+        xRequestId ?? null,
+
+      signatureValid:
+        valid
+    })
+  );
+
+
+  return valid;
+}
+
+
+/*
+ * ============================================================
+ * AMBIENTE
+ * ============================================================
+ */
+
+function getEnvironment(
+  url,
+  env
+) {
+  const pathname =
+    url.pathname
+      .replace(
+        /\/+$/,
+        ""
+      ) ||
+    "/";
+
+
+  /*
+   * TESTE
+   */
+
+  if (
+    pathname ===
+    "/test"
+  ) {
+    return {
+      name:
+        "test",
+
+      accessToken:
+        env.MERCADO_PAGO_TEST_ACCESS_TOKEN,
+
+      webhookSecret:
+        env.MERCADO_PAGO_TEST_WEBHOOK_SECRET
+    };
+  }
+
+
+  /*
+   * PRODUÇÃO
+   */
+
+  return {
+    name:
+      "production",
+
+    accessToken:
+      env.MERCADO_PAGO_ACCESS_TOKEN,
+
+    webhookSecret:
+      env.MERCADO_PAGO_WEBHOOK_SECRET
+  };
+}
+
+
+/*
+ * ============================================================
+ * API MERCADO PAGO
+ * ============================================================
+ */
+
+async function mercadoPagoGet(
+  path,
+  accessToken
+) {
+  if (!accessToken) {
+    throw new Error(
+      "Access Token Mercado Pago não configurado"
+    );
+  }
+
+  const response =
+    await fetch(
+      `https://api.mercadopago.com${path}`,
+      {
+        method:
+          "GET",
+
+        headers: {
+          Authorization:
+            `Bearer ${accessToken}`,
+
+          Accept:
+            "application/json"
+        }
+      }
+    );
+
+
+  const text =
+    await response.text();
+
+
+  let data =
+    null;
+
+  try {
+
+    data =
+      text
+        ? JSON.parse(
+            text
+          )
+        : null;
+
+  } catch {
+
+    data = {
+      raw:
+        text
+    };
+  }
+
+
+  if (
+    !response.ok
+  ) {
+    throw new Error(
+      `Mercado Pago API ${response.status}: ${text}`
+    );
+  }
+
+
+  return data;
+}
+
+
+/*
+ * ============================================================
+ * CONSULTAR PAGAMENTO
+ * ============================================================
+ */
+
+async function getPayment(
+  id,
+  accessToken
+) {
+  return mercadoPagoGet(
+    `/v1/payments/${encodeURIComponent(id)}`,
+    accessToken
+  );
+}
+
+
+/*
+ * ============================================================
+ * CONSULTAR ASSINATURA
+ * ============================================================
+ */
+
+async function getSubscription(
+  id,
+  accessToken
+) {
+  return mercadoPagoGet(
+    `/preapproval/${encodeURIComponent(id)}`,
+    accessToken
+  );
+}
+
+
+/*
+ * ============================================================
+ * RESUMO PAGAMENTO
+ * ============================================================
+ */
+
+function paymentSummary(
+  payment
+) {
+  return {
+
+    id:
+      payment?.id ??
+      null,
+
+    status:
+      payment?.status ??
+      null,
+
+    statusDetail:
+      payment?.status_detail ??
+      null,
+
+    amount:
+      payment?.transaction_amount ??
+      null,
+
+    currency:
+      payment?.currency_id ??
+      null,
+
+    description:
+      payment?.description ??
+      null,
+
+    externalReference:
+      payment?.external_reference ??
+      null,
+
+    payer: {
+
+      id:
+        payment?.payer?.id ??
+        null,
+
+      email:
+        payment?.payer?.email ??
+        null,
+
+      firstName:
+        payment?.payer?.first_name ??
+        null,
+
+      lastName:
+        payment?.payer?.last_name ??
+        null
+    },
+
+    dateApproved:
+      payment?.date_approved ??
+      null,
+
+    paymentMethod:
+      payment?.payment_method_id ??
+      null
+  };
+}
+
+
+/*
+ * ============================================================
+ * RESUMO ASSINATURA
+ * ============================================================
+ */
+
+function subscriptionSummary(
+  subscription
+) {
+  return {
+
+    id:
+      subscription?.id ??
+      null,
+
+    status:
+      subscription?.status ??
+      null,
+
+    reason:
+      subscription?.reason ??
+      null,
+
+    externalReference:
+      subscription
+        ?.external_reference ??
+      null,
+
+    planId:
+      subscription
+        ?.preapproval_plan_id ??
+      null,
+
+    payerId:
+      subscription
+        ?.payer_id ??
+      null,
+
+    payerEmail:
+      subscription
+        ?.payer_email ??
+      null,
+
+    dateCreated:
+      subscription
+        ?.date_created ??
+      null,
+
+    lastModified:
+      subscription
+        ?.last_modified ??
+      null,
+
+    nextPaymentDate:
+      subscription
+        ?.next_payment_date ??
+      null,
+
+    autoRecurring:
+      subscription
+        ?.auto_recurring
+        ? {
+
+            frequency:
+              subscription
+                .auto_recurring
+                .frequency ??
+              null,
+
+            frequencyType:
+              subscription
+                .auto_recurring
+                .frequency_type ??
+              null,
+
+            transactionAmount:
+              subscription
+                .auto_recurring
+                .transaction_amount ??
+              null,
+
+            currencyId:
+              subscription
+                .auto_recurring
+                .currency_id ??
+              null
+          }
+        :
+          null
+  };
+}
+
+
+/*
+ * ============================================================
+ * VALIDAR CONFIGURAÇÃO DO PLANO
+ * ============================================================
+ */
+
+function validatePlanConfiguration(
+  plan,
+  subscriptionSummaryData
+) {
+  if (
+    !plan ||
+    !subscriptionSummaryData
+  ) {
+    return {
+      valid:
+        false,
+
+      reason:
+        "Plano não identificado"
+    };
+  }
+
+
+  const recurring =
+    subscriptionSummaryData
+      .autoRecurring;
+
+
+  if (!recurring) {
+    return {
+      valid:
+        false,
+
+      reason:
+        "Informações de recorrência ausentes"
+    };
+  }
+
+
+  const amountMatches =
+    Number(
+      recurring.transactionAmount
+    ) ===
+    Number(
+      plan.amount
+    );
+
+
+  const frequencyMatches =
+    Number(
+      recurring.frequency
+    ) ===
+    Number(
+      plan.frequency
+    );
+
+
+  const frequencyTypeMatches =
+    recurring.frequencyType ===
+    plan.frequencyType;
+
+
+  return {
+
+    valid:
+      amountMatches &&
+      frequencyMatches &&
+      frequencyTypeMatches,
+
+    amountMatches,
+
+    frequencyMatches,
+
+    frequencyTypeMatches
+  };
+}
+
+
+
+/*
+ * ============================================================
+ * BANCO PROSHAPE - HYPERDRIVE
+ * ============================================================
+ *
+ * Binding configurada no Cloudflare:
+ * env.PROSHAPE_DB.connectionString
+ *
+ * Este helper faz apenas SELECT 1.
+ * Não lê nem altera dados de alunos.
+ * ============================================================
+ */
+
+async function checkProShapeDatabase(env) {
+  if (!env.PROSHAPE_DB?.connectionString) {
+    throw new Error(
+      "Binding PROSHAPE_DB não configurada"
+    );
+  }
+
+  const client = new Client({
+    connectionString:
+      env.PROSHAPE_DB.connectionString
+  });
+
+  try {
+    await client.connect();
+
+    const result =
+      await client.query(
+        "SELECT 1 AS ok"
+      );
+
+    return (
+      Number(
+        result?.rows?.[0]?.ok
+      ) === 1
+    );
+  } finally {
+    try {
+      await client.end();
+    } catch {
+      // Nada a fazer.
+    }
+  }
+}
+
+/*
+ * ============================================================
+ * WORKER
+ * ============================================================
+ */
+
+export default {
+
+  async fetch(
+    request,
+    env
+  ) {
+
+    const url =
+      new URL(
+        request.url
+      );
+
+
+    /*
+     * ========================================================
+     * DEFINIR AMBIENTE
+     * ========================================================
+     */
+
+    const environment =
+      getEnvironment(
+        url,
+        env
+      );
+
+
+    /*
+     * ========================================================
+     * GET
+     * ========================================================
+     */
+
+    if (
+      request.method ===
+      "GET"
+    ) {
+
+      /*
+       * ======================================================
+       * HEALTH CHECK DO POSTGRES VIA HYPERDRIVE
+       * ======================================================
+       *
+       * URL:
+       * /db-health
+       *
+       * Faz somente SELECT 1.
+       * ======================================================
+       */
+
+      if (
+        url.pathname.replace(/\/+$/, "") ===
+        "/db-health"
+      ) {
+        try {
+          const connected =
+            await checkProShapeDatabase(
+              env
+            );
+
+          return jsonResponse({
+            ok:
+              connected,
+
+            service:
+              "ProShape Database",
+
+            database:
+              connected
+                ? "connected"
+                : "not-connected",
+
+            hyperdrive:
+              "PROSHAPE_DB"
+          });
+        } catch (error) {
+          console.error(
+            "Erro no health check do banco:",
+            error instanceof Error
+              ? error.message
+              : String(error)
+          );
+
+          return jsonResponse(
+            {
+              ok:
+                false,
+
+              service:
+                "ProShape Database",
+
+              database:
+                "error",
+
+              error:
+                "Database connection failed"
+            },
+            500
+          );
+        }
+      }
+
+      return jsonResponse({
+
+        ok:
+          true,
+
+        service:
+          "ProShape Mercado Pago Webhook",
+
+        environment:
+          environment.name,
+
+        security:
+          "signature-validation-enabled",
+
+        mercadoPagoApi:
+          "enabled",
+
+        planIdentification:
+          "enabled"
+      });
+    }
+
+
+    /*
+     * ========================================================
+     * SOMENTE POST
+     * ========================================================
+     */
+
+    if (
+      request.method !==
+      "POST"
+    ) {
+
+      return jsonResponse(
+        {
+
+          ok:
+            false,
+
+          error:
+            "Method Not Allowed"
+        },
+
+        405
+      );
+    }
+
+
+    try {
+
+      /*
+       * ======================================================
+       * 1. VALIDAR ASSINATURA
+       * ======================================================
+       */
+
+      const validSignature =
+        await validateMercadoPagoSignature(
+          request,
+          environment.webhookSecret,
+          environment.name
+        );
+
+
+      if (
+        !validSignature
+      ) {
+
+        console.warn(
+          `Webhook ${environment.name} rejeitado: assinatura inválida`
+        );
+
+
+        return jsonResponse(
+          {
+
+            received:
+              false,
+
+            validated:
+              false,
+
+            environment:
+              environment.name,
+
+            error:
+              "Invalid signature"
+          },
+
+          401
+        );
+      }
+
+
+      /*
+       * ======================================================
+       * 2. LER BODY
+       * ======================================================
+       */
+
+      let body =
+        {};
+
+
+      try {
+
+        body =
+          await request.json();
+
+      } catch {
+
+        console.warn(
+          `Webhook ${environment.name}: corpo JSON vazio ou inválido`
+        );
+
+
+        return jsonResponse({
+
+          received:
+            true,
+
+          validated:
+            true,
+
+          environment:
+            environment.name,
+
+          processed:
+            false,
+
+          reason:
+            "Body JSON inválido ou vazio"
+        });
+      }
+
+
+      /*
+       * ======================================================
+       * 3. IDENTIFICAR EVENTO
+       * ======================================================
+       */
+
+      const queryType =
+        url.searchParams.get(
+          "type"
+        ) ||
+        "";
+
+
+      const bodyType =
+        body?.type ||
+        "";
+
+
+      /*
+       * Query possui prioridade.
+       */
+
+      const topic =
+        queryType ||
+        bodyType;
+
+
+      const entity =
+        body?.entity ||
+        "";
+
+
+      const action =
+        body?.action ||
+        "";
+
+
+      /*
+       * ID da URL
+       */
+
+      const queryDataId =
+        url.searchParams.get(
+          "data.id"
+        );
+
+
+      /*
+       * ID do body
+       */
+
+      const bodyDataId =
+        body?.data?.id ||
+        body?.id ||
+        null;
+
+
+      /*
+       * Prioridade URL
+       */
+
+      const dataId =
+        queryDataId ||
+        bodyDataId;
+
+
+      console.log(
+        "Webhook Mercado Pago validado:",
+        JSON.stringify({
+
+          environment:
+            environment.name,
+
+          queryType,
+
+          bodyType,
+
+          topic,
+
+          entity,
+
+          action,
+
+          dataId,
+
+          queryDataId:
+            queryDataId ??
+            null,
+
+          bodyDataId:
+            bodyDataId ??
+            null
+        })
+      );
+
+
+      /*
+       * ======================================================
+       * 4. SEM DATA ID
+       * ======================================================
+       */
+
+      if (
+        !dataId
+      ) {
+
+        return jsonResponse({
+
+          received:
+            true,
+
+          validated:
+            true,
+
+          environment:
+            environment.name,
+
+          processed:
+            false,
+
+          reason:
+            "Evento sem data.id"
+        });
+      }
+
+
+      /*
+       * ======================================================
+       * 5. SIMULADOR
+       * ======================================================
+       */
+
+      if (
+        String(
+          dataId
+        ) ===
+        "123456"
+      ) {
+
+        console.log(
+          "Simulação Mercado Pago recebida:",
+          JSON.stringify({
+
+            environment:
+              environment.name,
+
+            topic,
+
+            bodyType,
+
+            action,
+
+            dataId
+          })
+        );
+
+
+        return jsonResponse({
+
+          received:
+            true,
+
+          validated:
+            true,
+
+          simulated:
+            true,
+
+          environment:
+            environment.name,
+
+          topic,
+
+          dataId
+        });
+      }
+
+
+      /*
+       * ======================================================
+       * 6. PAGAMENTO AUTORIZADO DA ASSINATURA
+       * ======================================================
+       */
+
+      if (
+        topic ===
+        "subscription_authorized_payment"
+      ) {
+
+        console.log(
+          "Pagamento recorrente de assinatura recebido:",
+          JSON.stringify({
+
+            environment:
+              environment.name,
+
+            topic,
+
+            bodyType,
+
+            action,
+
+            dataId
+          })
+        );
+
+
+        return jsonResponse({
+
+          received:
+            true,
+
+          validated:
+            true,
+
+          environment:
+            environment.name,
+
+          processed:
+            true,
+
+          resource:
+            "subscription_authorized_payment",
+
+          dataId
+        });
+      }
+
+
+      /*
+       * ======================================================
+       * 7. PAGAMENTO
+       * ======================================================
+       */
+
+      if (
+        topic ===
+          "payment" ||
+
+        bodyType ===
+          "payment" ||
+
+        action.startsWith(
+          "payment."
+        )
+      ) {
+
+        const payment =
+          await getPayment(
+            dataId,
+            environment.accessToken
+          );
+
+
+        const summary =
+          paymentSummary(
+            payment
+          );
+
+
+        console.log(
+          "Pagamento consultado:",
+          JSON.stringify({
+
+            environment:
+              environment.name,
+
+            ...summary
+          })
+        );
+
+
+        /*
+         * PAGAMENTO APROVADO
+         */
+
+        if (
+          summary.status ===
+          "approved"
+        ) {
+
+          console.log(
+            "PAGAMENTO APROVADO:",
+            JSON.stringify({
+
+              environment:
+                environment.name,
+
+              ...summary
+            })
+          );
+        }
+
+
+        return jsonResponse({
+
+          received:
+            true,
+
+          validated:
+            true,
+
+          environment:
+            environment.name,
+
+          processed:
+            true,
+
+          resource:
+            "payment",
+
+          payment:
+            summary
+        });
+      }
+
+
+      /*
+       * ======================================================
+       * 8. ASSINATURA / PREAPPROVAL
+       * ======================================================
+       */
+
+      if (
+        topic ===
+          "subscription_preapproval" ||
+
+        topic ===
+          "preapproval" ||
+
+        entity ===
+          "preapproval"
+      ) {
+
+        /*
+         * Consultar assinatura real.
+         */
+
+        const subscription =
+          await getSubscription(
+            dataId,
+            environment.accessToken
+          );
+
+
+        const summary =
+          subscriptionSummary(
+            subscription
+          );
+
+
+        /*
+         * IDENTIFICAR PLANO
+         */
+
+        const plan =
+          identifyProShapePlan(
+            environment.name,
+            summary.planId
+          );
+
+
+        /*
+         * VALIDAR VALOR + FREQUÊNCIA
+         */
+
+        const planValidation =
+          validatePlanConfiguration(
+            plan,
+            summary
+          );
+
+
+        /*
+         * LOG DA ASSINATURA
+         */
+
+        console.log(
+          "Assinatura consultada:",
+          JSON.stringify({
+
+            environment:
+              environment.name,
+
+            ...summary
+          })
+        );
+
+
+        /*
+         * ====================================================
+         * IDENTIFICAÇÃO PROSHAPE
+         * ====================================================
+         */
+
+        const proShapeData = {
+
+          cliente:
+            summary.payerEmail,
+
+          assinaturaId:
+            summary.id,
+
+          status:
+            summary.status,
+
+          planoId:
+            summary.planId,
+
+          plano:
+            plan?.key ??
+            "desconhecido",
+
+          planoNome:
+            plan?.name ??
+            "Plano não identificado",
+
+          valor:
+            summary
+              .autoRecurring
+              ?.transactionAmount ??
+            null,
+
+          moeda:
+            summary
+              .autoRecurring
+              ?.currencyId ??
+            null,
+
+          frequencia:
+            summary
+              .autoRecurring
+              ?.frequency ??
+            null,
+
+          tipoFrequencia:
+            summary
+              .autoRecurring
+              ?.frequencyType ??
+            null,
+
+          proximaCobranca:
+            summary.nextPaymentDate,
+
+          planoValidado:
+            planValidation.valid
+        };
+
+
+        console.log(
+          "Assinatura ProShape identificada:",
+          JSON.stringify({
+            environment:
+              environment.name,
+
+            ...proShapeData
+          })
+        );
+
+
+        /*
+         * ====================================================
+         * PLANO NÃO RECONHECIDO
+         * ====================================================
+         */
+
+        if (!plan) {
+
+          console.warn(
+            "PLANO PROSHAPE NÃO IDENTIFICADO:",
+            JSON.stringify({
+
+              environment:
+                environment.name,
+
+              planId:
+                summary.planId,
+
+              subscriptionId:
+                summary.id,
+
+              payerEmail:
+                summary.payerEmail
+            })
+          );
+        }
+
+
+        /*
+         * ====================================================
+         * PLANO COM CONFIGURAÇÃO DIVERGENTE
+         * ====================================================
+         */
+
+        if (
+          plan &&
+          !planValidation.valid
+        ) {
+
+          console.warn(
+            "CONFIGURAÇÃO DO PLANO DIVERGENTE:",
+            JSON.stringify({
+
+              environment:
+                environment.name,
+
+              plan,
+
+              received:
+                summary.autoRecurring,
+
+              validation:
+                planValidation
+            })
+          );
+        }
+
+
+        /*
+         * ====================================================
+         * ASSINATURA ATIVA E PLANO VÁLIDO
+         * ====================================================
+         */
+
+        if (
+          plan &&
+          planValidation.valid &&
+          summary.status ===
+            "authorized"
+        ) {
+
+          console.log(
+            "ASSINATURA PROSHAPE ATIVA:",
+            JSON.stringify({
+
+              environment:
+                environment.name,
+
+              cliente:
+                summary.payerEmail,
+
+              plano:
+                plan.key,
+
+              planoNome:
+                plan.name,
+
+              assinaturaId:
+                summary.id,
+
+              proximaCobranca:
+                summary.nextPaymentDate
+            })
+          );
+
+
+          /*
+           * ================================================
+           * PRÓXIMA ETAPA
+           * ================================================
+           *
+           * Aqui entraremos com:
+           *
+           * - localizar cliente no ProShape
+           * - liberar acesso
+           * - registrar assinatura
+           * - enviar WhatsApp
+           *
+           * ================================================
+           */
+        }
+
+
+        return jsonResponse({
+
+          received:
+            true,
+
+          validated:
+            true,
+
+          environment:
+            environment.name,
+
+          processed:
+            true,
+
+          resource:
+            "subscription",
+
+          subscription:
+            summary,
+
+          proShape:
+            proShapeData,
+
+          plan:
+            plan,
+
+          planValidation:
+            planValidation
+        });
+      }
+
+
+      /*
+       * ======================================================
+       * 9. OUTROS EVENTOS SUBSCRIPTION_*
+       * ======================================================
+       */
+
+      if (
+        topic.startsWith(
+          "subscription_"
+        )
+      ) {
+
+        console.log(
+          "Evento de assinatura recebido:",
+          JSON.stringify({
+
+            environment:
+              environment.name,
+
+            topic,
+
+            bodyType,
+
+            action,
+
+            dataId
+          })
+        );
+
+
+        return jsonResponse({
+
+          received:
+            true,
+
+          validated:
+            true,
+
+          environment:
+            environment.name,
+
+          processed:
+            true,
+
+          resource:
+            "subscription_event",
+
+          topic,
+
+          dataId
+        });
+      }
+
+
+      /*
+       * ======================================================
+       * 10. EVENTOS NÃO UTILIZADOS
+       * ======================================================
+       */
+
+      console.log(
+        "Evento válido não utilizado:",
+        JSON.stringify({
+
+          environment:
+            environment.name,
+
+          topic,
+
+          bodyType,
+
+          entity,
+
+          action,
+
+          dataId
+        })
+      );
+
+
+      return jsonResponse({
+
+        received:
+          true,
+
+        validated:
+          true,
+
+        environment:
+          environment.name,
+
+        processed:
+          false,
+
+        reason:
+          "Evento não utilizado pela ProShape"
+      });
+
+
+    } catch (
+      error
+    ) {
+
+      console.error(
+        "Erro no webhook ProShape:",
+        error instanceof Error
+          ? error.message
+          : String(error)
+      );
+
+
+      return jsonResponse(
+        {
+
+          received:
+            false,
+
+          environment:
+            environment.name,
+
+          error:
+            "Webhook processing error",
+
+          details:
+            error instanceof Error
+              ? error.message
+              : String(error)
+        },
+
+        500
+      );
+    }
+  }
+};
